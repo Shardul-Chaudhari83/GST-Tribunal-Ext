@@ -80,9 +80,13 @@ other page or site.
    in-progress case finishes.
 4. When the run finishes, a summary shows how many cases were saved, had no
    documents, or failed, along with the reason for any failure.
-5. **Reset** (top of the panel) clears any saved scan/run progress and
+5. If any cases failed, a **Retry Failed (N)** button appears alongside
+   the summary — it re-processes only those cases (not the ones that
+   already succeeded), so you don't have to redo an entire large run over
+   a handful of failures.
+6. **Reset** (top of the panel) clears any saved scan/run progress and
    sends you back to the plain case list — use it if you want to abandon
-   a run partway through and start over. Chrome's `conflictAction:
+   a run partway through and start over instead. Chrome's `conflictAction:
    'uniquify'` means re-running from case 1 won't overwrite files already
    saved from a prior run; it'll save alongside them as `Name (1).pdf`
    etc. Delete the `GST Appellate Tribunal` folder first if you want a

@@ -97,21 +97,47 @@
 
   // --- IDLE MODE: scan + review -------------------------------------------
 
-  function renderIdle(lastSummary) {
+  function renderIdle(lastState) {
+    const failedCount = lastState ? lastState.results.filter((r) => r.status === 'error').length : 0;
     body().innerHTML = `
       <p class="gst-organizer-hint">
         Paginates through <strong>every page of the case list</strong>, then for each
         case fetches, merges, and downloads its PDFs. Nothing is uploaded anywhere &mdash;
         everything runs locally in your browser.
       </p>
-      ${lastSummary ? `<div id="gst-last-summary">${lastSummary}</div>` : ''}
+      ${lastState ? `<div id="gst-last-summary">${renderSummaryHtml(lastState)}</div>` : ''}
       <div id="gst-organizer-actions">
+        ${failedCount ? `<button id="gst-organizer-retry" class="gst-btn gst-btn-danger">Retry Failed (${failedCount})</button>` : ''}
         <button id="gst-organizer-scan" class="gst-btn gst-btn-primary">Scan All Cases</button>
       </div>
       <div id="gst-organizer-status"></div>
       <div id="gst-organizer-results"></div>
     `;
     document.getElementById('gst-organizer-scan').addEventListener('click', onScanButtonClick);
+    if (failedCount) {
+      document.getElementById('gst-organizer-retry').addEventListener('click', onRetryFailed(lastState));
+    }
+  }
+
+  /** Builds a fresh mini-run that re-processes only the cases that errored last time. */
+  function onRetryFailed(lastState) {
+    return async () => {
+      const failed = lastState.results.filter((r) => r.status === 'error');
+      if (!failed.length) return;
+      const queue = failed.map((r) => ({ filingNo: r.filingNo, title: r.title, status: 'pending' }));
+      const state = {
+        active: true,
+        queue,
+        currentIndex: 0,
+        results: [],
+        log: [],
+        usedFolderNames: [],
+        startedAt: Date.now(),
+      };
+      log(state, `Retrying ${queue.length} previously failed case(s).`);
+      await saveState(state);
+      location.href = window.GSTScraper.buildCaseUrl(queue[0].filingNo);
+    };
   }
 
   function setIdleStatus(msg, kind) {
@@ -272,10 +298,12 @@
   }
 
   function renderFinished(state) {
+    const failedCount = state.results.filter((r) => r.status === 'error').length;
     body().innerHTML = `
       <p class="gst-organizer-hint">Run finished.</p>
       ${renderSummaryHtml(state)}
       <div id="gst-organizer-actions">
+        ${failedCount ? `<button id="gst-organizer-retry" class="gst-btn gst-btn-danger">Retry Failed (${failedCount})</button>` : ''}
         <button id="gst-organizer-scan" class="gst-btn gst-btn-primary">Scan All Cases Again</button>
       </div>
     `;
@@ -283,6 +311,9 @@
       renderIdle(null); // rebuild the containers onScanAll/renderReview expect
       onScanButtonClick();
     });
+    if (failedCount) {
+      document.getElementById('gst-organizer-retry').addEventListener('click', onRetryFailed(state));
+    }
   }
 
   function renderSummaryHtml(state) {
@@ -492,7 +523,7 @@
     if (state && state.active) {
       await runAutomationStep(state);
     } else if (state && state.results && state.results.length) {
-      renderIdle(renderSummaryHtml(state));
+      renderIdle(state);
     } else {
       renderIdle(null);
     }
