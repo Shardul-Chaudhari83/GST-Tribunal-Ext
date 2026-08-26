@@ -4,9 +4,10 @@ A Chrome extension that organizes case documents from the GST Appellate
 Tribunal e-filing portal's **Submitted Documents** page
 (`https://efiling.gstat.gov.in/submittedDoc.drt`).
 
-For every case listed on that page, it downloads all of that case's PDF
-attachments, merges them into a single PDF, and saves it into a per-case
-folder, producing this structure inside your normal Downloads folder:
+It paginates through your full case list, and for every case downloads all
+of its PDF attachments, merges them into a single PDF, and saves it into a
+per-case folder, producing this structure inside your normal Downloads
+folder:
 
 ```
 Downloads/
@@ -23,10 +24,10 @@ filenames are sent anywhere other than the tribunal's own site.
 
 ## Why an extension, and why "only this page"
 
-`submittedDoc.drt` typically only shows documents for cases tied to your
-logged-in e-filing session, and the PDFs are served from behind that
-session's cookies. A generic script run outside the browser wouldn't have
-that session, so this is built as a browser extension that runs on the page
+`submittedDoc.drt` only shows documents for cases tied to your logged-in
+e-filing session, and the PDFs are served from behind that session's
+cookies. A generic script run outside the browser wouldn't have that
+session, so this is built as a browser extension that runs on the page
 itself, reusing your existing login. Per the task, it is scoped (via
 `host_permissions` and the content script's `matches` pattern) to only
 `https://efiling.gstat.gov.in/submittedDoc.drt*` — it does not touch any
@@ -45,61 +46,87 @@ other page or site.
 
 ## Usage
 
-1. Click **Scan Page for Cases**. The extension looks for every PDF link on
-   the page and groups them by the case they belong to.
-2. Review the results:
-   - Edit a case's title inline if you want a different folder name.
-   - Uncheck any PDF you don't want included in that case's merged file.
-   - Use the **Move to…** dropdown next to a PDF if it got grouped under
-     the wrong case — pick the correct case and it moves over.
-   - Click **Remove case** to drop a case from the list entirely (this only
-     affects the list in the panel, not the site).
-3. Click **Download All (Merged PDFs)**. For each case, the extension:
-   - Fetches every included PDF (using your existing logged-in session),
-   - Merges them into one PDF (page order = order the links appear on the
-     page),
+1. Click **Scan All Cases**. The extension pages through the entire case
+   list (clicking through every page of the table) collecting every case's
+   Filing No and Case Title. This can take a little while for a large
+   list — the panel shows live progress, and you can click the button again
+   to stop early.
+2. Review the results: uncheck any case you don't want processed, or edit
+   its title if you want a different folder name.
+3. Click **Start: Merge & Download All**. The extension then works through
+   the queue, one case at a time:
+   - Navigates to that case's document list
+     (`submittedDoc.drt?reply=&refrenceNo=<filingNo>`),
+   - Pages through *that* case's own document table (a case can have more
+     documents than fit on one page),
+   - Fetches every PDF and merges them into one,
    - Saves it as `GST Appellate Tribunal/<Case Title>/merged.pdf` under
-     your browser's default Downloads folder.
-4. Per-case progress and any errors (e.g. a broken link, or a PDF that
-   failed to load because the session expired) are shown under each case
-   card, and a final summary is shown at the bottom of the panel.
+     your browser's default Downloads folder,
+   - Moves on to the next case.
 
-## How the scraping works
+   Because each case lives on its own page, this involves real page
+   navigations — the panel's progress (current case, current step, and a
+   running log) persists across them, so you can watch it work. Click
+   **Stop After This Case** at any point to halt the run once the
+   in-progress case finishes.
+4. When the run finishes, a summary shows how many cases were saved, had no
+   documents, or failed, along with the reason for any failure.
 
-The exact HTML structure of `submittedDoc.drt` wasn't available while
-building this extension (the domain isn't reachable from the build
-environment), so `scraper.js` doesn't rely on one fixed set of CSS
-selectors. Instead it layers a few heuristics, in order, and uses whichever
-one successfully accounts for the PDF links on the page:
+## How it actually works (reverse-engineered from the live page)
 
-1. **Table rows** — if the PDF links live in a `<table>`, PDFs are grouped
-   by row, with support for a case-name cell that spans multiple rows via
-   `rowspan` (a common pattern for "one case, many documents" tables).
-2. **Headings** — if there's no table, each PDF link is grouped under the
-   nearest preceding heading-like element (`<h1>`–`<h6>`, or an element
-   whose class/id suggests it's a case/section title).
-3. **Nearest shared container** — as a last resort, PDF links are clustered
-   by the smallest containing element they share with other nearby links.
+The page's own inline `<script>` was read via the browser console to figure
+this out, since the domain isn't reachable from the environment this
+extension was built in:
 
-Because a heuristic can't be guaranteed to match a page it has never seen,
-the review step (editable titles, per-PDF include checkbox, and the
-**Move to…** control) exists specifically so you can correct any
-mis-grouping before anything is downloaded. If the scraper doesn't find any
-PDFs at all, make sure the page/table has fully finished loading before
-clicking **Scan Page for Cases**.
+- The case list and each case's document list are both jQuery **DataTables**
+  that paginate **in-page** (no full reload when you click "Next") — so
+  `scraper.js` clicks through pages and waits for the row content to
+  actually change, rather than assuming everything is in the DOM at once.
+- A case's document list is directly reachable by URL —
+  `submittedDoc.drt?reply=&refrenceNo=<filingNo>` — so the extension
+  navigates straight there instead of using the checkbox + "Proceed To
+  Document List" button.
+- Each PDF's "View" icon isn't a plain link. It's
+  `<a onclick="redirectDocument(598127)" href="#">`, and the page's own
+  script does:
+  ```js
+  function redirectDocument(documentId){
+    var encId = encryptStringWithXORtoHex(documentId,'SecretKey');
+    window.open("viewDocAll.drt?docid="+encId);
+  }
+  ```
+  i.e. it XORs the numeric document ID against the fixed key `"SecretKey"`,
+  hex-encodes the result, and opens `viewDocAll.drt?docid=<hex>`.
+  `scraper.js` ports that exact algorithm so it can compute the PDF's real
+  URL and `fetch()` it directly (instead of `window.open`, which would pop
+  a separate tab per document instead of letting them be merged).
+
+Because each case is processed on its own page load, progress (the case
+queue, current position, results, and folder-name de-duplication) is kept
+in `chrome.storage.local` under the key `gstAutomation` and picked back up
+on every page load — this is also what makes **Stop After This Case** and
+resuming after an accidental reload work.
 
 ## Notes & limitations
 
-- The merge order within a case is the order its PDF links appear on the
-  page.
+- This was built and reverse-engineered without direct access to the site
+  (only screenshots, a screen recording, and pasted browser-console output
+  were available), so some of it — especially exact table/column detection
+  — is written defensively (matched by header text, not hard-coded
+  indexes) but hasn't been run against the live site by the author. If
+  something doesn't work, open the panel's automation log and DevTools
+  console (errors are prefixed `[GST Organizer]`) and share what you see.
 - If a case's PDF fails to download (link is stale, session expired, file
-  is encrypted, etc.), that one file is skipped and noted in the case's
-  status line — the rest of that case's PDFs are still merged.
+  is encrypted, etc.), that one file is skipped and the rest of that case's
+  PDFs are still merged; a case with zero documents is recorded as such
+  rather than treated as an error.
 - Folder/file names are sanitized for filesystem compatibility (invalid
   characters like `\ / : * ? " < > |` are stripped) and de-duplicated if two
-  cases end up with the same name.
-- This extension only requests the `downloads`, `scripting`, and
-  `activeTab` permissions, plus host access to
+  cases end up with the same title.
+- The extension is polite about it: there's a short pause between
+  navigating from one case to the next.
+- This extension only requests the `downloads`, `scripting`, `activeTab`,
+  and `storage` permissions, plus host access to
   `https://efiling.gstat.gov.in/*`, and injects its content script only on
   `submittedDoc.drt`.
 
@@ -108,8 +135,8 @@ clicking **Scan Page for Cases**.
 ```
 manifest.json     Manifest V3 extension config
 background.js     Service worker: performs the actual chrome.downloads call
-content.js        Injects the review panel; fetches, merges, and saves PDFs
-scraper.js         Heuristic case/PDF grouping logic (see above)
+content.js        Panel UI + the cross-page automation state machine
+scraper.js         Site-specific scraping: pagination, XOR-hex PDF URLs
 content.css        Panel styling
 vendor/pdf-lib.min.js   Bundled locally (MIT licensed) — no CDN dependency
 ```

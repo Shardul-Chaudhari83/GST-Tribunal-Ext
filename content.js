@@ -1,271 +1,321 @@
 /**
  * content.js
  *
- * Injects a review panel into the GST Appellate Tribunal "Submitted
- * Documents" page. Lets the user scan the page for cases + their PDFs,
- * review/fix the grouping, then merges each case's PDFs into a single
- * PDF and saves it as:
+ * Drives the GST Appellate Tribunal "Submitted Documents" workflow:
  *
- *   GST Appellate Tribunal/<Case Title>/merged.pdf
+ *  1. On the case list (`submittedDoc.drt`), paginate through every page
+ *     of the DataTable to collect every case's Filing No + Case Title.
+ *  2. Let the user review/edit/remove cases, then start the run.
+ *  3. For each case, navigate to its document list
+ *     (`submittedDoc.drt?reply=&refrenceNo=<filingNo>`), paginate through
+ *     ITS DataTable too, fetch every PDF (decoding the site's XOR-hex
+ *     document-id scheme via scraper.js), merge them, and save as
+ *     `GST Appellate Tribunal/<Case Title>/merged.pdf`.
  *
- * via chrome.downloads (in background.js), using Chrome's subfolder
- * support in the download filename.
+ * Because each case lives on its own server-rendered URL, this can't run
+ * as one continuous in-memory loop — the extension re-runs on every page
+ * load, so progress is persisted in chrome.storage.local and each load
+ * picks up exactly where the last one left off.
  */
 (function () {
   'use strict';
 
   const ROOT_FOLDER = 'GST Appellate Tribunal';
-  let state = { groups: [] };
+  const STORAGE_KEY = 'gstAutomation';
+  const NAV_DELAY_MS = 700; // be polite to the server between case pages
+
+  let scanCancelled = false;
+  let stopRequested = false;
+
+  // --- storage helpers ---------------------------------------------------
+
+  function loadState() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get(STORAGE_KEY, (res) => resolve(res[STORAGE_KEY] || null));
+    });
+  }
+
+  function saveState(state) {
+    return new Promise((resolve) => {
+      chrome.storage.local.set({ [STORAGE_KEY]: state }, resolve);
+    });
+  }
+
+  function log(state, msg) {
+    state.log = state.log || [];
+    state.log.push(msg);
+    if (state.log.length > 300) state.log = state.log.slice(-300);
+  }
+
+  // --- filesystem-safe names ---------------------------------------------
 
   function sanitizeSegment(name, fallback) {
     let s = (name || '').toString();
-    // Strip characters invalid in Windows/macOS/Linux path segments.
     s = s.replace(/[\x00-\x1F<>:"/\\|?*]/g, ' ');
     s = s.replace(/\s+/g, ' ').trim();
-    s = s.replace(/[. ]+$/g, ''); // trailing dots/spaces break on Windows
+    s = s.replace(/[. ]+$/g, '');
     if (s.length > 120) s = s.slice(0, 120).trim();
     return s || fallback;
   }
 
-  function buildPanel() {
-    if (document.getElementById('gst-organizer-panel')) return;
+  // --- panel shell ---------------------------------------------------------
 
-    const panel = document.createElement('div');
+  function ensurePanel() {
+    let panel = document.getElementById('gst-organizer-panel');
+    if (panel) return panel;
+    panel = document.createElement('div');
     panel.id = 'gst-organizer-panel';
     panel.innerHTML = `
       <div id="gst-organizer-header">
         <span>GST Tribunal PDF Organizer</span>
         <div>
           <button id="gst-organizer-min" title="Minimize">_</button>
-          <button id="gst-organizer-close" title="Close">×</button>
         </div>
       </div>
-      <div id="gst-organizer-body">
-        <p class="gst-organizer-hint">
-          Scans <strong>this page only</strong> for case titles and their PDF documents.
-          Nothing is uploaded anywhere &mdash; everything runs locally in your browser.
-        </p>
-        <div id="gst-organizer-actions">
-          <button id="gst-organizer-scan" class="gst-btn gst-btn-primary">Scan Page for Cases</button>
-          <button id="gst-organizer-download" class="gst-btn gst-btn-success" disabled>Download All (Merged PDFs)</button>
-        </div>
-        <div id="gst-organizer-status"></div>
-        <div id="gst-organizer-results"></div>
-      </div>
+      <div id="gst-organizer-body"></div>
     `;
     document.documentElement.appendChild(panel);
-
-    panel.querySelector('#gst-organizer-close').addEventListener('click', () => panel.remove());
     panel.querySelector('#gst-organizer-min').addEventListener('click', () => {
       panel.classList.toggle('gst-minimized');
     });
-    panel.querySelector('#gst-organizer-scan').addEventListener('click', onScan);
-    panel.querySelector('#gst-organizer-download').addEventListener('click', onDownloadAll);
+    return panel;
   }
 
-  function setStatus(msg, kind) {
+  function body() {
+    return ensurePanel().querySelector('#gst-organizer-body');
+  }
+
+  // --- IDLE MODE: scan + review -------------------------------------------
+
+  function renderIdle(lastSummary) {
+    body().innerHTML = `
+      <p class="gst-organizer-hint">
+        Paginates through <strong>every page of the case list</strong>, then for each
+        case fetches, merges, and downloads its PDFs. Nothing is uploaded anywhere &mdash;
+        everything runs locally in your browser.
+      </p>
+      ${lastSummary ? `<div id="gst-last-summary">${lastSummary}</div>` : ''}
+      <div id="gst-organizer-actions">
+        <button id="gst-organizer-scan" class="gst-btn gst-btn-primary">Scan All Cases</button>
+      </div>
+      <div id="gst-organizer-status"></div>
+      <div id="gst-organizer-results"></div>
+    `;
+    document.getElementById('gst-organizer-scan').addEventListener('click', onScanButtonClick);
+  }
+
+  function setIdleStatus(msg, kind) {
     const el = document.getElementById('gst-organizer-status');
     if (!el) return;
     el.textContent = msg || '';
     el.className = kind ? 'gst-status-' + kind : '';
   }
 
-  function onScan() {
-    setStatus('Scanning page…', 'info');
-    let scan;
-    try {
-      scan = window.GSTScraper.scanPage();
-    } catch (err) {
-      console.error('[GST Organizer] scan failed', err);
-      setStatus('Scan failed: ' + err.message, 'error');
+  let reviewCases = [];
+  let scanning = false;
+
+  function onScanButtonClick() {
+    if (scanning) {
+      scanCancelled = true;
       return;
     }
-
-    if (!scan.groups.length) {
-      setStatus(
-        'No PDF links were found on this page. Make sure the case list has finished loading, then try again.',
-        'error'
-      );
-      state.groups = [];
-      renderResults();
-      document.getElementById('gst-organizer-download').disabled = true;
-      return;
-    }
-
-    state.groups = scan.groups;
-    renderResults();
-    const totalPdfs = state.groups.reduce((n, g) => n + g.pdfs.length, 0);
-    setStatus(
-      `Found ${state.groups.length} case(s) with ${totalPdfs} PDF(s) total (using "${scan.strategy}" grouping). Review below, then download.`,
-      'success'
-    );
-    document.getElementById('gst-organizer-download').disabled = false;
+    onScanAll();
   }
 
-  function renderResults() {
+  async function onScanAll() {
+    const btn = document.getElementById('gst-organizer-scan');
+    scanning = true;
+    scanCancelled = false;
+    btn.textContent = 'Stop Scanning';
+
+    setIdleStatus('Scanning page 1…', 'info');
+    try {
+      const result = await window.GSTScraper.scanAllCasePages(({ page, count }) => {
+        setIdleStatus(`Scanning page ${page}… ${count} case(s) found so far.`, 'info');
+        if (scanCancelled) throw new Error('__CANCELLED__');
+      });
+      if (result.error) {
+        setIdleStatus(result.error, 'error');
+        return;
+      }
+      reviewCases = result.cases.map((c) => ({ ...c, include: true }));
+      renderReview();
+      setIdleStatus(`Found ${reviewCases.length} case(s). Review below, then start.`, 'success');
+    } catch (err) {
+      if (err.message === '__CANCELLED__') {
+        setIdleStatus('Scan stopped.', 'warn');
+      } else {
+        console.error('[GST Organizer] scan failed', err);
+        setIdleStatus('Scan failed: ' + err.message, 'error');
+      }
+    } finally {
+      scanning = false;
+      btn.textContent = 'Scan All Cases';
+    }
+  }
+
+  function renderReview() {
     const container = document.getElementById('gst-organizer-results');
-    container.innerHTML = '';
+    container.innerHTML = `
+      <div id="gst-organizer-start-row">
+        <button id="gst-organizer-start" class="gst-btn gst-btn-success">
+          Start: Merge &amp; Download All (${reviewCases.filter((c) => c.include).length})
+        </button>
+      </div>
+      <ul class="gst-case-review-list"></ul>
+    `;
+    const list = container.querySelector('.gst-case-review-list');
 
-    state.groups.forEach((group, gIdx) => {
-      const card = document.createElement('div');
-      card.className = 'gst-case-card';
-      card.dataset.groupIdx = String(gIdx);
+    reviewCases.forEach((c, idx) => {
+      const li = document.createElement('li');
+      li.className = 'gst-case-review-row';
 
-      const header = document.createElement('div');
-      header.className = 'gst-case-header';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = c.include;
+      cb.addEventListener('change', () => {
+        c.include = cb.checked;
+        document.getElementById('gst-organizer-start').textContent =
+          `Start: Merge & Download All (${reviewCases.filter((x) => x.include).length})`;
+      });
 
       const titleInput = document.createElement('input');
       titleInput.type = 'text';
-      titleInput.value = group.title;
       titleInput.className = 'gst-case-title-input';
+      titleInput.value = c.title;
       titleInput.addEventListener('input', () => {
-        group.title = titleInput.value;
+        c.title = titleInput.value;
       });
 
-      const removeBtn = document.createElement('button');
-      removeBtn.className = 'gst-btn gst-btn-small gst-btn-danger';
-      removeBtn.textContent = 'Remove case';
-      removeBtn.title = 'Remove this case from the list (does not affect the site)';
-      removeBtn.addEventListener('click', () => {
-        state.groups.splice(gIdx, 1);
-        renderResults();
-      });
+      const filingLabel = document.createElement('span');
+      filingLabel.className = 'gst-filing-no';
+      filingLabel.textContent = c.filingNo;
 
-      header.appendChild(titleInput);
-      header.appendChild(removeBtn);
-      card.appendChild(header);
+      li.appendChild(cb);
+      li.appendChild(titleInput);
+      li.appendChild(filingLabel);
+      list.appendChild(li);
+    });
 
-      const pdfList = document.createElement('ul');
-      pdfList.className = 'gst-pdf-list';
-      group.pdfs.forEach((pdf, pIdx) => {
-        const li = document.createElement('li');
+    document.getElementById('gst-organizer-start').addEventListener('click', onStartAutomation);
+  }
 
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.checked = pdf.include;
-        cb.addEventListener('change', () => {
-          pdf.include = cb.checked;
-        });
+  async function onStartAutomation() {
+    const queue = reviewCases
+      .filter((c) => c.include)
+      .map((c) => ({ filingNo: c.filingNo, title: c.title, status: 'pending' }));
+    if (!queue.length) {
+      setIdleStatus('No cases selected.', 'error');
+      return;
+    }
+    const state = {
+      active: true,
+      queue,
+      currentIndex: 0,
+      results: [],
+      log: [],
+      startedAt: Date.now(),
+    };
+    log(state, `Starting run: ${queue.length} case(s).`);
+    await saveState(state);
+    location.href = window.GSTScraper.buildCaseUrl(queue[0].filingNo);
+  }
 
-        const label = document.createElement('span');
-        label.className = 'gst-pdf-name';
-        label.textContent = pdf.filename;
-        label.title = pdf.url;
+  // --- AUTOMATION MODE -----------------------------------------------------
 
-        const moveSelect = document.createElement('select');
-        moveSelect.className = 'gst-move-select';
-        const keepOpt = document.createElement('option');
-        keepOpt.value = '';
-        keepOpt.textContent = 'Move to…';
-        moveSelect.appendChild(keepOpt);
-        state.groups.forEach((otherGroup, oIdx) => {
-          if (oIdx === gIdx) return;
-          const opt = document.createElement('option');
-          opt.value = String(oIdx);
-          opt.textContent = otherGroup.title;
-          moveSelect.appendChild(opt);
-        });
-        moveSelect.addEventListener('change', () => {
-          const targetIdx = parseInt(moveSelect.value, 10);
-          if (Number.isNaN(targetIdx)) return;
-          group.pdfs.splice(pIdx, 1);
-          state.groups[targetIdx].pdfs.push(pdf);
-          renderResults();
-        });
+  function renderAutomationPanel(state) {
+    const current = state.queue[state.currentIndex];
+    body().innerHTML = `
+      <div id="gst-auto-status">
+        <strong>Case ${Math.min(state.currentIndex + 1, state.queue.length)} of ${state.queue.length}</strong>
+        ${current ? `<div class="gst-auto-current">${escapeHtml(current.title)}</div>` : ''}
+      </div>
+      <div id="gst-auto-progress"></div>
+      <div id="gst-organizer-actions">
+        <button id="gst-organizer-stop" class="gst-btn gst-btn-danger">Stop After This Case</button>
+      </div>
+      <div id="gst-auto-log"></div>
+    `;
+    document.getElementById('gst-organizer-stop').addEventListener('click', async () => {
+      stopRequested = true;
+      const fresh = (await loadState()) || state;
+      fresh.active = false;
+      log(fresh, 'Stop requested by user.');
+      await saveState(fresh);
+      setAutoProgress('Will stop after the current case finishes downloading…', 'warn');
+    });
+    renderLog(state);
+  }
 
-        li.appendChild(cb);
-        li.appendChild(label);
-        li.appendChild(moveSelect);
-        pdfList.appendChild(li);
-      });
-      card.appendChild(pdfList);
+  function setAutoProgress(msg, kind) {
+    const el = document.getElementById('gst-auto-progress');
+    if (!el) return;
+    el.textContent = msg;
+    el.className = kind ? 'gst-status-' + kind : '';
+  }
 
-      const statusLine = document.createElement('div');
-      statusLine.className = 'gst-case-status';
-      statusLine.id = 'gst-case-status-' + gIdx;
-      card.appendChild(statusLine);
+  function renderLog(state) {
+    const el = document.getElementById('gst-auto-log');
+    if (!el) return;
+    const lines = (state.log || []).slice(-8);
+    el.innerHTML = lines.map((l) => `<div>${escapeHtml(l)}</div>`).join('');
+  }
 
-      container.appendChild(card);
+  function renderFinished(state) {
+    body().innerHTML = `
+      <p class="gst-organizer-hint">Run finished.</p>
+      ${renderSummaryHtml(state)}
+      <div id="gst-organizer-actions">
+        <button id="gst-organizer-scan" class="gst-btn gst-btn-primary">Scan All Cases Again</button>
+      </div>
+    `;
+    document.getElementById('gst-organizer-scan').addEventListener('click', () => {
+      renderIdle(null); // rebuild the containers onScanAll/renderReview expect
+      onScanButtonClick();
     });
   }
 
-  function setCaseStatus(gIdx, msg, kind) {
-    const el = document.getElementById('gst-case-status-' + gIdx);
-    if (!el) return;
-    el.textContent = msg;
-    el.className = 'gst-case-status ' + (kind ? 'gst-status-' + kind : '');
+  function renderSummaryHtml(state) {
+    const done = state.results.filter((r) => r.status === 'done').length;
+    const empty = state.results.filter((r) => r.status === 'empty').length;
+    const errored = state.results.filter((r) => r.status === 'error').length;
+    const rows = state.results
+      .map(
+        (r) =>
+          `<div class="gst-summary-row gst-status-${r.status === 'done' ? 'success' : r.status === 'empty' ? 'warn' : 'error'}">` +
+          `${escapeHtml(r.title)} &mdash; ${escapeHtml(r.detail || r.status)}</div>`
+      )
+      .join('');
+    return `
+      <p><strong>Last run:</strong> ${done} saved, ${empty} had no documents, ${errored} failed.</p>
+      <div class="gst-summary-list">${rows}</div>
+    `;
   }
 
-  async function fetchAsArrayBuffer(url) {
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  async function fetchPdfBytes(url) {
     const resp = await fetch(url, { credentials: 'include' });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
-    const contentType = resp.headers.get('content-type') || '';
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const buf = await resp.arrayBuffer();
-    // Sanity check: some portals return an HTML login/error page with a 200
-    // status when the session has expired. Guard against silently "merging"
-    // an HTML error page in as if it were a PDF.
     const head = new Uint8Array(buf.slice(0, 5));
     const isPdfMagic = String.fromCharCode(...head) === '%PDF-';
+    const contentType = resp.headers.get('content-type') || '';
     if (!isPdfMagic && !/pdf/i.test(contentType)) {
-      throw new Error('Response does not look like a PDF (session expired or link changed?)');
+      throw new Error('Response is not a PDF (session expired?)');
     }
     return buf;
   }
 
-  async function mergeCasePdfs(group, gIdx) {
-    const included = group.pdfs.filter((p) => p.include);
-    if (!included.length) {
-      setCaseStatus(gIdx, 'Skipped (no PDFs selected).', 'warn');
-      return null;
-    }
-
-    const merged = await PDFLib.PDFDocument.create();
-    let okCount = 0;
-    const errors = [];
-
-    for (const pdf of included) {
-      setCaseStatus(gIdx, `Fetching ${pdf.filename}…`, 'info');
-      try {
-        const bytes = await fetchAsArrayBuffer(pdf.url);
-        const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
-        const pages = await merged.copyPages(src, src.getPageIndices());
-        pages.forEach((p) => merged.addPage(p));
-        okCount += 1;
-      } catch (err) {
-        console.error('[GST Organizer] failed on', pdf.url, err);
-        errors.push(`${pdf.filename}: ${err.message}`);
-      }
-    }
-
-    if (okCount === 0) {
-      setCaseStatus(gIdx, 'Failed: could not read any of the selected PDFs.', 'error');
-      return null;
-    }
-
-    setCaseStatus(gIdx, 'Building merged PDF…', 'info');
-    const mergedBytes = await merged.save();
-
-    if (errors.length) {
-      setCaseStatus(
-        gIdx,
-        `Merged ${okCount}/${included.length} PDF(s). ${errors.length} skipped: ${errors.join('; ')}`,
-        'warn'
-      );
-    }
-
-    return mergedBytes;
-  }
-
   function bytesToDataUrl(bytes) {
-    // Chunked base64 encoding to avoid call-stack issues with very large PDFs.
     let binary = '';
     const chunkSize = 0x8000;
     for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode.apply(null, chunk);
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
     }
-    const base64 = btoa(binary);
-    return `data:application/pdf;base64,${base64}`;
+    return `data:application/pdf;base64,${btoa(binary)}`;
   }
 
   function requestDownload(filename, dataUrl) {
@@ -281,42 +331,156 @@
     });
   }
 
-  async function onDownloadAll() {
-    const downloadBtn = document.getElementById('gst-organizer-download');
-    downloadBtn.disabled = true;
-    const usedFolderNames = new Set();
+  // Folder-name de-duplication has to survive across page loads (each case
+  // is processed on its own navigation, in a fresh JS context), so it's
+  // tracked in the persisted state rather than a module-level Set.
+  function uniqueFolderName(state, title, fallback) {
+    state.usedFolderNames = state.usedFolderNames || [];
+    const used = new Set(state.usedFolderNames);
+    let base = sanitizeSegment(title, fallback);
+    let candidate = base;
+    let n = 2;
+    while (used.has(candidate.toLowerCase())) {
+      candidate = `${base} (${n})`;
+      n += 1;
+    }
+    state.usedFolderNames.push(candidate.toLowerCase());
+    return candidate;
+  }
 
-    let successCount = 0;
-    for (let gIdx = 0; gIdx < state.groups.length; gIdx++) {
-      const group = state.groups[gIdx];
+  /** Processes the case whose document-list page we're currently on. */
+  async function processCurrentCase(state, current) {
+    setAutoProgress('Scanning document pages…', 'info');
+    const scan = await window.GSTScraper.scanAllDocPages(({ page, count }) => {
+      setAutoProgress(`Scanning document page ${page}… ${count} PDF(s) found.`, 'info');
+    });
+
+    if (scan.error) {
+      log(state, `${current.title}: ${scan.error}`);
+      state.results.push({ filingNo: current.filingNo, title: current.title, status: 'error', detail: scan.error });
+      return;
+    }
+    if (!scan.docs.length) {
+      log(state, `${current.title}: no documents found.`);
+      state.results.push({ filingNo: current.filingNo, title: current.title, status: 'empty', detail: 'No documents' });
+      return;
+    }
+
+    const merged = await PDFLib.PDFDocument.create();
+    let ok = 0;
+    const errors = [];
+    for (const doc of scan.docs) {
+      setAutoProgress(`Fetching ${doc.fileName}…`, 'info');
       try {
-        const mergedBytes = await mergeCasePdfs(group, gIdx);
-        if (!mergedBytes) continue;
-
-        let folderName = sanitizeSegment(group.title, `Case ${gIdx + 1}`);
-        let unique = folderName;
-        let suffix = 2;
-        while (usedFolderNames.has(unique.toLowerCase())) {
-          unique = `${folderName} (${suffix})`;
-          suffix += 1;
-        }
-        usedFolderNames.add(unique.toLowerCase());
-
-        const dataUrl = bytesToDataUrl(mergedBytes);
-        const path = `${ROOT_FOLDER}/${unique}/merged.pdf`;
-        setCaseStatus(gIdx, 'Saving to Downloads/' + path + ' …', 'info');
-        await requestDownload(path, dataUrl);
-        setCaseStatus(gIdx, `Saved to Downloads/${path}`, 'success');
-        successCount += 1;
+        const bytes = await fetchPdfBytes(doc.url);
+        const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        const pages = await merged.copyPages(src, src.getPageIndices());
+        pages.forEach((p) => merged.addPage(p));
+        ok += 1;
       } catch (err) {
-        console.error('[GST Organizer] case failed', group.title, err);
-        setCaseStatus(gIdx, 'Error: ' + err.message, 'error');
+        errors.push(`${doc.fileName}: ${err.message}`);
       }
     }
 
-    setStatus(`Done. ${successCount}/${state.groups.length} case folder(s) saved under "${ROOT_FOLDER}".`, 'success');
-    downloadBtn.disabled = false;
+    if (ok === 0) {
+      const detail = 'Could not read any of the ' + scan.docs.length + ' PDF(s).';
+      log(state, `${current.title}: ${detail}`);
+      state.results.push({ filingNo: current.filingNo, title: current.title, status: 'error', detail });
+      return;
+    }
+
+    setAutoProgress('Building merged PDF…', 'info');
+    const mergedBytes = await merged.save();
+    const folderName = uniqueFolderName(state, current.title, `Case ${state.currentIndex + 1}`);
+    const path = `${ROOT_FOLDER}/${folderName}/merged.pdf`;
+    const dataUrl = bytesToDataUrl(mergedBytes);
+
+    setAutoProgress('Saving ' + path + ' …', 'info');
+    await requestDownload(path, dataUrl);
+
+    const detail =
+      errors.length > 0
+        ? `Saved (${ok}/${scan.docs.length} PDFs; ${errors.length} skipped)`
+        : `Saved (${ok} PDF${ok === 1 ? '' : 's'})`;
+    log(state, `${current.title}: ${detail}${errors.length ? ' — ' + errors.join('; ') : ''}`);
+    state.results.push({ filingNo: current.filingNo, title: current.title, status: 'done', detail });
   }
 
-  buildPanel();
+  async function runAutomationStep(state) {
+    if (state.currentIndex >= state.queue.length || !state.active) {
+      state.active = false;
+      log(state, 'Run finished.');
+      await saveState(state);
+      renderFinished(state);
+      // Clean the URL back to the plain case list, if we're not there already.
+      if (window.GSTScraper.getRefFromUrl()) {
+        await sleep(NAV_DELAY_MS);
+        location.href = new URL('submittedDoc.drt', document.baseURI).href;
+      }
+      return;
+    }
+
+    const current = state.queue[state.currentIndex];
+    const urlRef = window.GSTScraper.getRefFromUrl();
+
+    if (urlRef !== current.filingNo) {
+      renderAutomationPanel(state);
+      setAutoProgress(`Navigating to case ${state.currentIndex + 1} of ${state.queue.length}…`, 'info');
+      location.href = window.GSTScraper.buildCaseUrl(current.filingNo);
+      return;
+    }
+
+    renderAutomationPanel(state);
+    try {
+      await processCurrentCase(state, current);
+    } catch (err) {
+      console.error('[GST Organizer] case failed', current.title, err);
+      log(state, `${current.title}: unexpected error — ${err.message}`);
+      state.results.push({ filingNo: current.filingNo, title: current.title, status: 'error', detail: err.message });
+    }
+
+    state.currentIndex += 1;
+
+    // If Stop was clicked while we were mid-download, its handler already
+    // wrote active:false to storage — fold that into our own `state` object
+    // (set synchronously via the module-level flag, so no race) rather than
+    // re-reading storage and risking two writers stomping on each other.
+    if (stopRequested) {
+      state.active = false;
+      log(state, 'Stop requested by user.');
+    }
+    await saveState(state);
+
+    if (!state.active) {
+      renderFinished(state);
+      return;
+    }
+
+    await sleep(NAV_DELAY_MS);
+    if (state.currentIndex >= state.queue.length) {
+      location.href = new URL('submittedDoc.drt', document.baseURI).href;
+    } else {
+      location.href = window.GSTScraper.buildCaseUrl(state.queue[state.currentIndex].filingNo);
+    }
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // --- boot ----------------------------------------------------------------
+
+  async function boot() {
+    ensurePanel();
+    const state = await loadState();
+    if (state && state.active) {
+      await runAutomationStep(state);
+    } else if (state && state.results && state.results.length) {
+      renderIdle(renderSummaryHtml(state));
+    } else {
+      renderIdle(null);
+    }
+  }
+
+  boot();
 })();
