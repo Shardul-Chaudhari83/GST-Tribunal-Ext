@@ -3,7 +3,7 @@
   position: fixed;
   top: 16px;
   right: 16px;
-  width: 380px;
+  width: 400px;
   max-height: 85vh;
   z-index: 2147483647;
   background: #ffffff;
@@ -96,6 +96,7 @@
 .gst-btn-success {
   background: #1f8a3d;
   color: #fff;
+  width: 100%;
 }
 
 .gst-btn-success:hover:not(:disabled) {
@@ -105,12 +106,6 @@
 .gst-btn-danger {
   background: #b3261e;
   color: #fff;
-}
-
-.gst-btn-small {
-  flex: none;
-  padding: 4px 8px;
-  font-size: 11px;
 }
 
 #gst-organizer-status {
@@ -124,24 +119,29 @@
 .gst-status-warn { color: #a86400; }
 .gst-status-error { color: #b3261e; }
 
-#gst-organizer-results {
+/* --- review list (after "Scan All Cases") --- */
+
+#gst-organizer-start-row {
+  margin-bottom: 10px;
+}
+
+.gst-case-review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 
-.gst-case-card {
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  padding: 8px;
-  background: #fafafa;
-}
-
-.gst-case-header {
+.gst-case-review-row {
   display: flex;
-  gap: 6px;
-  margin-bottom: 6px;
   align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  border-bottom: 1px solid #eee;
 }
 
 .gst-case-title-input {
@@ -149,40 +149,63 @@
   padding: 5px 7px;
   border: 1px solid #ccc;
   border-radius: 4px;
-  font-weight: 600;
+  font-size: 12px;
+  min-width: 0;
 }
 
-.gst-pdf-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.gst-pdf-list li {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.gst-pdf-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.gst-filing-no {
+  font-size: 10.5px;
+  color: #888;
   white-space: nowrap;
 }
 
-.gst-move-select {
-  font-size: 11px;
-  max-width: 90px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
+/* --- automation-mode panel --- */
+
+#gst-auto-status {
+  margin-bottom: 8px;
+  line-height: 1.4;
 }
 
-.gst-case-status {
-  margin-top: 6px;
-  font-size: 11.5px;
+.gst-auto-current {
+  font-size: 12px;
+  color: #444;
+  margin-top: 2px;
+}
+
+#gst-auto-progress {
+  margin-bottom: 10px;
+  min-height: 16px;
   line-height: 1.4;
+}
+
+#gst-auto-log {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #eee;
+  font-size: 11px;
+  color: #666;
+  line-height: 1.5;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+/* --- run summary --- */
+
+#gst-last-summary {
+  margin-bottom: 10px;
+  padding: 8px;
+  background: #f5f7fa;
+  border-radius: 6px;
+}
+
+.gst-summary-list {
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.gst-summary-row {
+  padding: 2px 0;
+  border-bottom: 1px solid #eee;
 }
