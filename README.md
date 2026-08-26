@@ -112,5 +112,9 @@ content.js        Injects the review panel; fetches, merges, and saves PDFs
 scraper.js         Heuristic case/PDF grouping logic (see above)
 content.css        Panel styling
 vendor/pdf-lib.min.js   Bundled locally (MIT licensed) — no CDN dependency
-icons/              Toolbar icons
 ```
+
+No custom toolbar icon is bundled, so Chrome shows its default
+puzzle-piece icon for this extension — purely cosmetic. Drop your own
+16/48/128px PNGs into an `icons/` folder and reference them from
+`manifest.json`'s `icons` / `action.default_icon` fields if you'd like one.
