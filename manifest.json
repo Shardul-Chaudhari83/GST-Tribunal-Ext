@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "GST Appellate Tribunal - Case PDF Organizer",
+  "version": "1.0.0",
+  "description": "Scans the GST Appellate Tribunal e-filing 'Submitted Documents' page and downloads a merged PDF per case, organized into GST Appellate Tribunal/<Case Title>/ folders.",
+  "action": {
+    "default_title": "GST Tribunal PDF Organizer"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "downloads",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://efiling.gstat.gov.in/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://efiling.gstat.gov.in/submittedDoc.drt*"],
+      "js": ["vendor/pdf-lib.min.js", "scraper.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
