@@ -13,14 +13,23 @@ folder:
 Downloads/
 └── GST Appellate Tribunal/
     ├── <Case Title 1>/
-    │   └── merged.pdf
+    │   └── <Case Title 1>.pdf
     ├── <Case Title 2>/
-    │   └── merged.pdf
+    │   └── <Case Title 2>.pdf
     └── ...
 ```
 
 Everything happens locally in your browser — no case data, PDFs, or
 filenames are sent anywhere other than the tribunal's own site.
+
+> **Before your first run**, open `chrome://settings/downloads` and turn
+> **off** "Ask where to save each file before downloading". If it's on,
+> Chrome will pop a Save-As dialog for *every single case* and — because
+> that dialog doesn't reliably follow the per-case subfolder the extension
+> requests — files can end up overwriting each other in whatever folder the
+> dialog was last pointed at. No extension can override this setting; it's
+> an intentional browser safeguard. With it off, every save is silent and
+> lands exactly where expected.
 
 ## Why an extension, and why "only this page"
 
@@ -60,8 +69,8 @@ other page or site.
    - Pages through *that* case's own document table (a case can have more
      documents than fit on one page),
    - Fetches every PDF and merges them into one,
-   - Saves it as `GST Appellate Tribunal/<Case Title>/merged.pdf` under
-     your browser's default Downloads folder,
+   - Saves it as `GST Appellate Tribunal/<Case Title>/<Case Title>.pdf`
+     under your browser's default Downloads folder,
    - Moves on to the next case.
 
    Because each case lives on its own page, this involves real page
@@ -71,6 +80,13 @@ other page or site.
    in-progress case finishes.
 4. When the run finishes, a summary shows how many cases were saved, had no
    documents, or failed, along with the reason for any failure.
+5. **Reset** (top of the panel) clears any saved scan/run progress and
+   sends you back to the plain case list — use it if you want to abandon
+   a run partway through and start over. Chrome's `conflictAction:
+   'uniquify'` means re-running from case 1 won't overwrite files already
+   saved from a prior run; it'll save alongside them as `Name (1).pdf`
+   etc. Delete the `GST Appellate Tribunal` folder first if you want a
+   clean slate.
 
 ## How it actually works (reverse-engineered from the live page)
 
@@ -120,6 +136,10 @@ resuming after an accidental reload work.
   is encrypted, etc.), that one file is skipped and the rest of that case's
   PDFs are still merged; a case with zero documents is recorded as such
   rather than treated as an error.
+- The merged PDF is handed to the background service worker as a `blob:`
+  URL, not as bytes in the message itself — `chrome.runtime.sendMessage`
+  has a ~64MiB payload cap that a document-heavy case's merged PDF can
+  exceed as base64.
 - Folder/file names are sanitized for filesystem compatibility (invalid
   characters like `\ / : * ? " < > |` are stripped) and de-duplicated if two
   cases end up with the same title.

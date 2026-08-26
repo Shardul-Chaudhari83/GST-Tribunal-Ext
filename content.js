@@ -69,6 +69,7 @@
       <div id="gst-organizer-header">
         <span>GST Tribunal PDF Organizer</span>
         <div>
+          <button id="gst-organizer-reset" class="gst-header-reset" title="Clear saved scan/run progress and start over">Reset</button>
           <button id="gst-organizer-min" title="Minimize">_</button>
         </div>
       </div>
@@ -77,6 +78,15 @@
     document.documentElement.appendChild(panel);
     panel.querySelector('#gst-organizer-min').addEventListener('click', () => {
       panel.classList.toggle('gst-minimized');
+    });
+    panel.querySelector('#gst-organizer-reset').addEventListener('click', async () => {
+      if (!confirm('Clear saved scan/run progress and start over from scratch?')) return;
+      stopRequested = true;
+      await chrome.storage.local.remove(STORAGE_KEY);
+      // Land back on the plain case list (not wherever we currently are —
+      // e.g. mid-run this could be a specific case's document-list page,
+      // which the idle panel's "Scan All Cases" can't work from).
+      location.href = new URL('submittedDoc.drt', document.baseURI).href;
     });
     return panel;
   }
@@ -309,18 +319,22 @@
     return buf;
   }
 
-  function bytesToDataUrl(bytes) {
-    let binary = '';
-    const chunkSize = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
-    }
-    return `data:application/pdf;base64,${btoa(binary)}`;
-  }
-
-  function requestDownload(filename, dataUrl) {
+  /**
+   * chrome.runtime.sendMessage has a ~64MiB payload cap, and a merged PDF
+   * for a document-heavy case can exceed that as base64. So instead of
+   * sending the bytes themselves, we create a blob: URL here (a short
+   * opaque string) and send just that — chrome.downloads.download() in
+   * background.js can fetch a blob: URL created by this content script's
+   * page directly, without the data ever passing through the message
+   * channel.
+   */
+  function requestDownload(filename, bytes) {
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: 'GST_DOWNLOAD_PDF', filename, dataUrl }, (response) => {
+      const blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+      chrome.runtime.sendMessage({ type: 'GST_DOWNLOAD_PDF', filename, url: blobUrl }, (response) => {
+        // The download has been handed to Chrome by now (or failed to be);
+        // either way this content script's copy of the blob is no longer needed.
+        URL.revokeObjectURL(blobUrl);
         if (chrome.runtime.lastError) {
           reject(new Error(chrome.runtime.lastError.message));
           return;
@@ -392,11 +406,13 @@
     setAutoProgress('Building merged PDF…', 'info');
     const mergedBytes = await merged.save();
     const folderName = uniqueFolderName(state, current.title, `Case ${state.currentIndex + 1}`);
-    const path = `${ROOT_FOLDER}/${folderName}/merged.pdf`;
-    const dataUrl = bytesToDataUrl(mergedBytes);
+    // The filename itself repeats the case title (not just "merged.pdf") so
+    // the file is self-identifying even if it ever ends up outside its
+    // folder, or a "Save As" prompt lands somewhere unexpected.
+    const path = `${ROOT_FOLDER}/${folderName}/${folderName}.pdf`;
 
     setAutoProgress('Saving ' + path + ' …', 'info');
-    await requestDownload(path, dataUrl);
+    await requestDownload(path, mergedBytes);
 
     const detail =
       errors.length > 0

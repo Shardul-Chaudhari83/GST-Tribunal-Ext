@@ -48,6 +48,15 @@
   opacity: 0.75;
 }
 
+.gst-header-reset {
+  font-size: 11px !important;
+  font-weight: 600;
+  border: 1px solid rgba(255, 255, 255, 0.5) !important;
+  border-radius: 4px;
+  padding: 3px 7px !important;
+  margin-right: 4px;
+}
+
 #gst-organizer-body {
   padding: 12px;
   overflow-y: auto;

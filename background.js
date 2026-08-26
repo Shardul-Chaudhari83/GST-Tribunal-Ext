@@ -2,21 +2,29 @@
  * background.js (MV3 service worker)
  *
  * Content scripts cannot call chrome.downloads directly, so the panel in
- * content.js sends the merged PDF (as a data: URL) here, and this worker
- * performs the actual chrome.downloads.download() call. Chrome's downloads
- * API turns "/" in the filename into real subfolders under the browser's
+ * content.js sends a blob: URL for the merged PDF here (not the bytes
+ * themselves — chrome.runtime.sendMessage has a ~64MiB payload cap that a
+ * document-heavy case's merged PDF can exceed), and this worker performs
+ * the actual chrome.downloads.download() call. Chrome's downloads API
+ * turns "/" in the filename into real subfolders under the browser's
  * default Downloads directory, which is how the
- * "GST Appellate Tribunal/<Case Title>/merged.pdf" structure gets created.
+ * "GST Appellate Tribunal/<Case Title>/<Case Title>.pdf" structure gets
+ * created.
+ *
+ * Note: if the user has Chrome's "Ask where to save each file before
+ * downloading" setting on, Chrome will still prompt for every download —
+ * no extension API can suppress that per-file dialog once that setting is
+ * enabled; the fix is to turn that setting off in chrome://settings/downloads.
  */
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== 'GST_DOWNLOAD_PDF') return false;
 
-  const { filename, dataUrl } = message;
+  const { filename, url } = message;
 
   chrome.downloads.download(
     {
-      url: dataUrl,
+      url,
       filename,
       saveAs: false,
       conflictAction: 'uniquify',
