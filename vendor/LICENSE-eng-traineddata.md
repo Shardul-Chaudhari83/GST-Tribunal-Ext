@@ -1,0 +1,1 @@
+eng.traineddata.gz (LSTM 'fast' model) sourced from https://github.com/naptha/tessdata (Apache-2.0), which itself repackages Tesseract OCR's official English trained data (Apache-2.0, https://github.com/tesseract-ocr/tessdata_fast).

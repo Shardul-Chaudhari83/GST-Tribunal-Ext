@@ -396,7 +396,7 @@
     return candidate;
   }
 
-  /** Fetches + merges one group of docs into a single PDF's bytes. */
+  /** Fetches + merges one group of docs (by URL) into a single PDF's bytes. */
   async function mergeDocs(docs, groupLabel) {
     const merged = await PDFLib.PDFDocument.create();
     let ok = 0;
@@ -406,6 +406,31 @@
       try {
         const bytes = await fetchPdfBytes(doc.url);
         const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        const pages = await merged.copyPages(src, src.getPageIndices());
+        pages.forEach((p) => merged.addPage(p));
+        ok += 1;
+      } catch (err) {
+        errors.push(`${doc.fileName}: ${err.message}`);
+      }
+    }
+    if (ok === 0) return { bytes: null, ok, errors };
+    return { bytes: await merged.save(), ok, errors };
+  }
+
+  /** Merges docs that were already fetched (bytes attached) — used for the
+   *  "Other Documents" group, since each doc's bytes are needed for page-
+   *  number detection anyway and re-fetching would be wasteful. */
+  async function mergeFromAnalyzed(analyzedDocs) {
+    const merged = await PDFLib.PDFDocument.create();
+    let ok = 0;
+    const errors = [];
+    for (const doc of analyzedDocs) {
+      if (!doc.bytes) {
+        errors.push(`${doc.fileName}: ${doc.fetchError || 'could not fetch'}`);
+        continue;
+      }
+      try {
+        const src = await PDFLib.PDFDocument.load(doc.bytes, { ignoreEncryption: true });
         const pages = await merged.copyPages(src, src.getPageIndices());
         pages.forEach((p) => merged.addPage(p));
         ok += 1;
@@ -429,39 +454,7 @@
     return { attempted: true, saved: true, ok: r.ok, total: docs.length, errors: r.errors };
   }
 
-  /** Processes the case whose document-list page we're currently on. */
-  async function processCurrentCase(state, current) {
-    setAutoProgress('Scanning document pages…', 'info');
-    const scan = await window.GSTScraper.scanAllDocPages(({ page, count }) => {
-      setAutoProgress(`Scanning document page ${page}… ${count} PDF(s) found.`, 'info');
-    });
-
-    if (scan.error) {
-      log(state, `${current.title}: ${scan.error}`);
-      state.results.push({ filingNo: current.filingNo, title: current.title, status: 'error', detail: scan.error });
-      return;
-    }
-    if (!scan.docs.length) {
-      log(state, `${current.title}: no documents found.`);
-      state.results.push({ filingNo: current.filingNo, title: current.title, status: 'empty', detail: 'No documents' });
-      return;
-    }
-
-    // Doc Type = SPLIT_DOC_TYPE (e.g. "Appeal") is saved as its own file;
-    // everything else is merged into one "Other Documents" file alongside it.
-    const splitDocs = scan.docs.filter((d) => (d.docType || '').trim().toLowerCase() === SPLIT_DOC_TYPE);
-    const otherDocs = scan.docs.filter((d) => (d.docType || '').trim().toLowerCase() !== SPLIT_DOC_TYPE);
-
-    const folderName = uniqueFolderName(state, current.title, `Case ${state.currentIndex + 1}`);
-    const groups = [
-      { label: 'Appeal', file: 'Appeal', result: await mergeAndSave(splitDocs, 'Appeal', 'Appeal', folderName) },
-      {
-        label: 'Other Documents',
-        file: 'Other Documents',
-        result: await mergeAndSave(otherDocs, 'Other Documents', 'Other Documents', folderName),
-      },
-    ];
-
+  function recordCaseResult(state, current, groups) {
     const savedParts = [];
     const allErrors = [];
     groups.forEach(({ label, result }) => {
@@ -471,7 +464,7 @@
       } else {
         allErrors.push(`${label}: could not read any of ${result.total} PDF(s)`);
       }
-      result.errors.forEach((e) => allErrors.push(`${label} - ${e}`));
+      (result.errors || []).forEach((e) => allErrors.push(`${label} - ${e}`));
     });
 
     if (!savedParts.length) {
@@ -484,6 +477,190 @@
     const detail = savedParts.join(', ') + (allErrors.length ? ` — issues: ${allErrors.join('; ')}` : '');
     log(state, `${current.title}: ${detail}`);
     state.results.push({ filingNo: current.filingNo, title: current.title, status: 'done', detail });
+  }
+
+  /** Fetches each "Other Documents" doc and detects its page number (text or OCR). */
+  async function analyzeOtherDocs(docs) {
+    const analyzed = [];
+    for (const doc of docs) {
+      setAutoProgress(`Fetching Other Documents: ${doc.fileName}…`, 'info');
+      let bytes = null;
+      let fetchError = null;
+      try {
+        bytes = await fetchPdfBytes(doc.url);
+      } catch (err) {
+        fetchError = err.message;
+      }
+
+      let number = null;
+      let confidence = 'none';
+      let ocrConfidence;
+      if (bytes) {
+        const detected = await window.GSTPageNumber.detectPageNumber(bytes, (msg) =>
+          setAutoProgress(`${doc.fileName}: ${msg}`, 'info')
+        );
+        number = detected.number;
+        confidence = detected.confidence;
+        ocrConfidence = detected.ocrConfidence;
+      }
+      analyzed.push({ ...doc, bytes, fetchError, number, confidence, ocrConfidence });
+    }
+    return analyzed;
+  }
+
+  /** Sorts by detected number ascending; undetected docs keep their original relative order, appended last. */
+  function orderOtherDocs(analyzedDocs) {
+    const numbered = analyzedDocs.filter((d) => d.number !== null && d.number !== undefined);
+    const unnumbered = analyzedDocs.filter((d) => d.number === null || d.number === undefined);
+    numbered.sort((a, b) => a.number - b.number);
+    return [...numbered, ...unnumbered];
+  }
+
+  /** Merges + saves both groups for a case and records the result. Used both
+   *  for the fully-automatic path and after a review pause is confirmed. */
+  async function finalizeCase(state, current, splitDocs, analyzedOther, folderName) {
+    const appealResult = await mergeAndSave(splitDocs, 'Appeal', 'Appeal', folderName);
+
+    let otherResult = { attempted: false };
+    const orderedOther = orderOtherDocs(analyzedOther);
+    if (orderedOther.length) {
+      setAutoProgress('Building Other Documents (sorted by page number)…', 'info');
+      const r = await mergeFromAnalyzed(orderedOther);
+      if (r.bytes) {
+        const path = `${ROOT_FOLDER}/${folderName}/Other Documents.pdf`;
+        setAutoProgress('Saving ' + path + ' …', 'info');
+        await requestDownload(path, r.bytes);
+        otherResult = { attempted: true, saved: true, ok: r.ok, total: orderedOther.length, errors: r.errors };
+      } else {
+        otherResult = { attempted: true, saved: false, total: orderedOther.length, errors: r.errors };
+      }
+    }
+
+    recordCaseResult(state, current, [
+      { label: 'Appeal', result: appealResult },
+      { label: 'Other Documents', result: otherResult },
+    ]);
+  }
+
+  // --- page-number review pause --------------------------------------------
+  // The pause itself is only ever held in-memory (as the `review` object
+  // passed between these functions) since it never needs to survive a
+  // navigation — reviewing happens in place, on the case's own page.
+
+  function confidenceLabel(c) {
+    return { text: 'Text', 'ocr-high': 'OCR', 'ocr-low': 'OCR (low)', none: 'Unknown' }[c] || c;
+  }
+
+  function renderReviewPanel(review) {
+    body().innerHTML = `
+      <div id="gst-auto-status">
+        <strong>Review needed: ${escapeHtml(review.current.title)}</strong>
+        <div class="gst-auto-current">
+          Some "Other Documents" page numbers couldn't be read confidently.
+          Check/fix the number for each below (blank = keep at the end, in
+          upload order), then confirm.
+        </div>
+      </div>
+      <ul class="gst-review-doc-list"></ul>
+      <div id="gst-organizer-actions">
+        <button id="gst-review-confirm" class="gst-btn gst-btn-success">Confirm &amp; Merge</button>
+        <button id="gst-review-skip" class="gst-btn gst-btn-danger">Skip (upload order)</button>
+      </div>
+    `;
+    const list = body().querySelector('.gst-review-doc-list');
+
+    orderOtherDocs(review.analyzedOther).forEach((doc) => {
+      const li = document.createElement('li');
+      li.className = 'gst-review-doc-row';
+
+      const badge = document.createElement('span');
+      badge.className = 'gst-confidence-badge gst-confidence-' + doc.confidence;
+      badge.textContent = confidenceLabel(doc.confidence);
+      if (doc.ocrConfidence !== undefined) badge.title = `OCR confidence: ${doc.ocrConfidence}%`;
+
+      const name = document.createElement('span');
+      name.className = 'gst-review-doc-name';
+      name.textContent = doc.fileName;
+      name.title = doc.docType || '';
+
+      const numInput = document.createElement('input');
+      numInput.type = 'number';
+      numInput.className = 'gst-review-number-input';
+      numInput.value = doc.number ?? '';
+      numInput.placeholder = '#';
+      numInput.addEventListener('input', () => {
+        const v = numInput.value.trim();
+        doc.number = v === '' ? null : Number(v);
+      });
+
+      li.appendChild(badge);
+      li.appendChild(name);
+      li.appendChild(numInput);
+      list.appendChild(li);
+    });
+
+    body()
+      .querySelector('#gst-review-confirm')
+      .addEventListener('click', () => resolveReview(review, true));
+    body()
+      .querySelector('#gst-review-skip')
+      .addEventListener('click', () => resolveReview(review, false));
+  }
+
+  async function resolveReview(review, useEditedNumbers) {
+    const { state, current, splitDocs, analyzedOther, folderName } = review;
+    const otherToUse = useEditedNumbers ? analyzedOther : analyzedOther.map((d) => ({ ...d, number: null }));
+
+    renderAutomationPanel(state);
+    try {
+      await finalizeCase(state, current, splitDocs, otherToUse, folderName);
+    } catch (err) {
+      console.error('[GST Organizer] case failed after review', current.title, err);
+      log(state, `${current.title}: unexpected error — ${err.message}`);
+      state.results.push({ filingNo: current.filingNo, title: current.title, status: 'error', detail: err.message });
+    }
+    await finishCaseStep(state);
+  }
+
+  // --- main per-case step ---------------------------------------------------
+
+  /** Processes the case whose document-list page we're currently on. Returns
+   *  true if it paused for review (caller must not advance/navigate yet). */
+  async function processCurrentCase(state, current) {
+    setAutoProgress('Scanning document pages…', 'info');
+    const scan = await window.GSTScraper.scanAllDocPages(({ page, count }) => {
+      setAutoProgress(`Scanning document page ${page}… ${count} PDF(s) found.`, 'info');
+    });
+
+    if (scan.error) {
+      log(state, `${current.title}: ${scan.error}`);
+      state.results.push({ filingNo: current.filingNo, title: current.title, status: 'error', detail: scan.error });
+      return false;
+    }
+    if (!scan.docs.length) {
+      log(state, `${current.title}: no documents found.`);
+      state.results.push({ filingNo: current.filingNo, title: current.title, status: 'empty', detail: 'No documents' });
+      return false;
+    }
+
+    // Doc Type = SPLIT_DOC_TYPE (e.g. "Appeal") is saved as its own file;
+    // everything else is merged into one "Other Documents" file, ordered by
+    // each document's detected page number.
+    const splitDocs = scan.docs.filter((d) => (d.docType || '').trim().toLowerCase() === SPLIT_DOC_TYPE);
+    const otherDocsRaw = scan.docs.filter((d) => (d.docType || '').trim().toLowerCase() !== SPLIT_DOC_TYPE);
+    const folderName = uniqueFolderName(state, current.title, `Case ${state.currentIndex + 1}`);
+
+    const analyzedOther = await analyzeOtherDocs(otherDocsRaw);
+    const needsReview =
+      analyzedOther.length > 1 && analyzedOther.some((d) => d.confidence === 'ocr-low' || d.confidence === 'none');
+
+    if (needsReview) {
+      renderReviewPanel({ state, current, splitDocs, analyzedOther, folderName });
+      return true;
+    }
+
+    await finalizeCase(state, current, splitDocs, analyzedOther, folderName);
+    return false;
   }
 
   async function runAutomationStep(state) {
@@ -511,19 +688,27 @@
     }
 
     renderAutomationPanel(state);
+    let paused = false;
     try {
-      await processCurrentCase(state, current);
+      paused = await processCurrentCase(state, current);
     } catch (err) {
       console.error('[GST Organizer] case failed', current.title, err);
       log(state, `${current.title}: unexpected error — ${err.message}`);
       state.results.push({ filingNo: current.filingNo, title: current.title, status: 'error', detail: err.message });
     }
 
+    if (paused) return; // renderReviewPanel is showing; resolveReview() continues the run
+
+    await finishCaseStep(state);
+  }
+
+  /** Advances to the next case (or finishes the run) after a case is done. */
+  async function finishCaseStep(state) {
     state.currentIndex += 1;
 
-    // If Stop was clicked while we were mid-download, its handler already
-    // wrote active:false to storage — fold that into our own `state` object
-    // (set synchronously via the module-level flag, so no race) rather than
+    // If Stop was clicked while we were mid-case, its handler already wrote
+    // active:false to storage — fold that into our own `state` object (set
+    // synchronously via the module-level flag, so no race) rather than
     // re-reading storage and risking two writers stomping on each other.
     if (stopRequested) {
       state.active = false;

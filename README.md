@@ -8,8 +8,9 @@ It paginates through your full case list, and for every case downloads all
 of its PDF attachments into a per-case folder — the document whose **Doc
 Type** is "Appeal" is saved on its own as `Appeal.pdf`, and everything
 else (Affidavit, Annexure, Show Cause Notice, etc.) is merged into one
-`Other Documents.pdf` — producing this structure inside your normal
-Downloads folder:
+`Other Documents.pdf`, **ordered by the page number printed near the top
+of each document** (not upload order) — producing this structure inside
+your normal Downloads folder:
 
 ```
 Downloads/
@@ -77,10 +78,14 @@ other page or site.
      documents than fit on one page),
    - Fetches every PDF, splitting out the one(s) with Doc Type "Appeal"
      from the rest,
+   - Detects each "Other Documents" PDF's page number (see below) and
+     sorts by it before merging,
    - Saves `GST Appellate Tribunal - Split/<Case Title>/Appeal.pdf` and/or
      `.../Other Documents.pdf` under your browser's default Downloads
      folder (whichever group has documents),
-   - Moves on to the next case.
+   - Moves on to the next case — unless the page-number detection wasn't
+     confident, in which case it **pauses on that case** for you to
+     review (see below) before continuing.
 
    Because each case lives on its own page, this involves real page
    navigations — the panel's progress (current case, current step, and a
@@ -136,6 +141,58 @@ in `chrome.storage.local` under the key `gstAutomation` and picked back up
 on every page load — this is also what makes **Stop After This Case** and
 resuming after an accidental reload work.
 
+## How the page-number ordering works, and the review pause
+
+Court filings are typically hand-compiled with a page number written near
+the top of each document (sometimes typed, sometimes hand-written and
+circled — see examples worked out with the user while building this). For
+each "Other Documents" PDF, `ocr.js` tries, in order:
+
+1. **Real PDF text** (`pdf.js`'s `getTextContent()`) — looks for an
+   isolated 1–4 digit token in the top ~30% of the first page. Fast and
+   exact; works for typed/born-digital documents.
+2. **OCR** (`Tesseract.js`, restricted to digits only) — renders the top
+   band of the first page to a canvas and reads it, for documents with no
+   text layer (scanned documents). A result is only trusted automatically
+   if Tesseract's own confidence score is ≥ 70; below that it's marked
+   `ocr-low`.
+
+If a case has more than one "Other Document" and **any** of them came back
+`ocr-low` or undetected, the run **pauses on that case** instead of
+guessing: the panel shows every document with its detected number (in an
+editable box) and a confidence badge (green = text, blue = OCR, red = low
+confidence/unknown), sorted by best guess. Fix any numbers that look
+wrong, then:
+
+- **Confirm & Merge** — merges in the order given by the numbers currently
+  in the boxes (edited or not).
+- **Skip (upload order)** — ignores detected numbers entirely for this
+  case and merges in the order the documents were uploaded.
+
+The run then continues to the next case automatically. This is a real,
+inherent accuracy trade-off — OCR on a hand-written, circled number is not
+reliable, and this review step exists specifically so a bad guess never
+gets baked into a merged PDF silently.
+
+**Things worth knowing:**
+- This added ~6.9MB of bundled libraries (`pdf.js` + `Tesseract.js` + its
+  WASM OCR core + a compact English trained-data file, all vendored
+  locally — no CDN, per Manifest V3 rules). OCR itself also makes
+  document-heavy, scanned-document cases noticeably slower to process
+  than before.
+- The split/merge logic (`SPLIT_DOC_TYPE` in `content.js`), the OCR
+  confidence threshold, and the "top band" search region
+  (`OCR_CONFIDENCE_THRESHOLD` / `TOP_BAND_FRACTION` in `ocr.js`) are all
+  small, named constants if they need tuning.
+- **Untested caveat**: OCR runs inside the content script (the page's own
+  JS context) so it can use `<canvas>`, which a background service worker
+  can't. If this specific site's Content-Security-Policy turns out to
+  block WebAssembly or Worker creation for content scripts (impossible to
+  confirm without live access to the site), OCR would fail with a clear
+  error in the log rather than silently — if you see that, tell me and
+  this can be moved to run inside `background.js` instead, which has its
+  own CSP unaffected by the page's.
+
 ## Notes & limitations
 
 - This was built and reverse-engineered without direct access to the site
@@ -175,9 +232,14 @@ resuming after an accidental reload work.
 manifest.json     Manifest V3 extension config
 background.js     Service worker: performs the actual chrome.downloads call
 content.js        Panel UI + the cross-page automation state machine
-scraper.js         Site-specific scraping: pagination, XOR-hex PDF URLs
-content.css        Panel styling
-vendor/pdf-lib.min.js   Bundled locally (MIT licensed) — no CDN dependency
+scraper.js        Site-specific scraping: pagination, XOR-hex PDF URLs
+ocr.js            Page-number detection: pdf.js text layer, Tesseract.js OCR fallback
+content.css       Panel styling
+vendor/           Bundled locally (all Apache-2.0/MIT) — no CDN dependency:
+  pdf-lib.min.js         builds/merges PDFs
+  pdf.min.js + pdf.worker.min.js         reads PDF text/renders pages (pdf.js)
+  tesseract.min.js + tesseract-worker.min.js
+    + tesseract-core-lstm.{js,wasm} + eng.traineddata.gz   OCR (Tesseract.js)
 ```
 
 No custom toolbar icon is bundled, so Chrome shows its default

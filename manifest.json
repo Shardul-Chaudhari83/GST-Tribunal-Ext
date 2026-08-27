@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "GST Appellate Tribunal - Case PDF Organizer",
-  "version": "3.0.0",
-  "description": "Paginates the GST Appellate Tribunal e-filing case list, then per case downloads its Appeal PDF separately from the rest (merged), organized into GST Appellate Tribunal - Split/<Case Title>/ folders.",
+  "version": "4.0.0",
+  "description": "Paginates the GST Appellate Tribunal e-filing case list; per case, saves the Appeal PDF separately and merges the rest in page-number order (via text/OCR detection), organized into GST Appellate Tribunal - Split/<Case Title>/ folders.",
   "action": {
     "default_title": "GST Tribunal PDF Organizer"
   },
@@ -21,9 +21,28 @@
   "content_scripts": [
     {
       "matches": ["https://efiling.gstat.gov.in/submittedDoc.drt*"],
-      "js": ["vendor/pdf-lib.min.js", "scraper.js", "content.js"],
+      "js": [
+        "vendor/pdf-lib.min.js",
+        "vendor/pdf.min.js",
+        "vendor/tesseract.min.js",
+        "scraper.js",
+        "ocr.js",
+        "content.js"
+      ],
       "css": ["content.css"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "vendor/pdf.worker.min.js",
+        "vendor/tesseract-worker.min.js",
+        "vendor/tesseract-core-lstm.js",
+        "vendor/tesseract-core-lstm.wasm",
+        "vendor/eng.traineddata.gz"
+      ],
+      "matches": ["https://efiling.gstat.gov.in/*"]
     }
   ]
 }

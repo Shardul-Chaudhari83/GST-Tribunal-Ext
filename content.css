@@ -198,6 +198,68 @@
   overflow-y: auto;
 }
 
+/* --- page-number review pause --- */
+
+.gst-review-doc-list {
+  list-style: none;
+  margin: 0 0 10px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.gst-review-doc-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  border-bottom: 1px solid #eee;
+}
+
+.gst-review-doc-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.gst-review-number-input {
+  width: 52px;
+  padding: 4px 5px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.gst-confidence-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.gst-confidence-text {
+  background: #e3f3e6;
+  color: #1f8a3d;
+}
+
+.gst-confidence-ocr-high {
+  background: #eaf0fb;
+  color: #154382;
+}
+
+.gst-confidence-ocr-low,
+.gst-confidence-none {
+  background: #fdeceb;
+  color: #b3261e;
+}
+
 /* --- run summary --- */
 
 #gst-last-summary {
