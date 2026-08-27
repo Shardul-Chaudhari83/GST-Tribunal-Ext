@@ -20,8 +20,11 @@
 (function () {
   'use strict';
 
-  const ROOT_FOLDER = 'GST Appellate Tribunal';
+  const ROOT_FOLDER = 'GST Appellate Tribunal - Split';
   const STORAGE_KEY = 'gstAutomation';
+  // Doc Type value (case-insensitive, trimmed) that gets saved as its own
+  // file instead of going into the combined "Other Documents" merge.
+  const SPLIT_DOC_TYPE = 'appeal';
   const NAV_DELAY_MS = 700; // be polite to the server between case pages
 
   let scanCancelled = false;
@@ -393,6 +396,39 @@
     return candidate;
   }
 
+  /** Fetches + merges one group of docs into a single PDF's bytes. */
+  async function mergeDocs(docs, groupLabel) {
+    const merged = await PDFLib.PDFDocument.create();
+    let ok = 0;
+    const errors = [];
+    for (const doc of docs) {
+      setAutoProgress(`Fetching ${groupLabel}: ${doc.fileName}…`, 'info');
+      try {
+        const bytes = await fetchPdfBytes(doc.url);
+        const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        const pages = await merged.copyPages(src, src.getPageIndices());
+        pages.forEach((p) => merged.addPage(p));
+        ok += 1;
+      } catch (err) {
+        errors.push(`${doc.fileName}: ${err.message}`);
+      }
+    }
+    if (ok === 0) return { bytes: null, ok, errors };
+    return { bytes: await merged.save(), ok, errors };
+  }
+
+  /** Merges one doc group (if non-empty) and saves it as <folderName>/<fileLabel>.pdf. */
+  async function mergeAndSave(docs, groupLabel, fileLabel, folderName) {
+    if (!docs.length) return { attempted: false };
+    const r = await mergeDocs(docs, groupLabel);
+    if (!r.bytes) return { attempted: true, saved: false, total: docs.length, errors: r.errors };
+
+    const path = `${ROOT_FOLDER}/${folderName}/${fileLabel}.pdf`;
+    setAutoProgress('Saving ' + path + ' …', 'info');
+    await requestDownload(path, r.bytes);
+    return { attempted: true, saved: true, ok: r.ok, total: docs.length, errors: r.errors };
+  }
+
   /** Processes the case whose document-list page we're currently on. */
   async function processCurrentCase(state, current) {
     setAutoProgress('Scanning document pages…', 'info');
@@ -411,45 +447,42 @@
       return;
     }
 
-    const merged = await PDFLib.PDFDocument.create();
-    let ok = 0;
-    const errors = [];
-    for (const doc of scan.docs) {
-      setAutoProgress(`Fetching ${doc.fileName}…`, 'info');
-      try {
-        const bytes = await fetchPdfBytes(doc.url);
-        const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
-        const pages = await merged.copyPages(src, src.getPageIndices());
-        pages.forEach((p) => merged.addPage(p));
-        ok += 1;
-      } catch (err) {
-        errors.push(`${doc.fileName}: ${err.message}`);
-      }
-    }
+    // Doc Type = SPLIT_DOC_TYPE (e.g. "Appeal") is saved as its own file;
+    // everything else is merged into one "Other Documents" file alongside it.
+    const splitDocs = scan.docs.filter((d) => (d.docType || '').trim().toLowerCase() === SPLIT_DOC_TYPE);
+    const otherDocs = scan.docs.filter((d) => (d.docType || '').trim().toLowerCase() !== SPLIT_DOC_TYPE);
 
-    if (ok === 0) {
-      const detail = 'Could not read any of the ' + scan.docs.length + ' PDF(s).';
+    const folderName = uniqueFolderName(state, current.title, `Case ${state.currentIndex + 1}`);
+    const groups = [
+      { label: 'Appeal', file: 'Appeal', result: await mergeAndSave(splitDocs, 'Appeal', 'Appeal', folderName) },
+      {
+        label: 'Other Documents',
+        file: 'Other Documents',
+        result: await mergeAndSave(otherDocs, 'Other Documents', 'Other Documents', folderName),
+      },
+    ];
+
+    const savedParts = [];
+    const allErrors = [];
+    groups.forEach(({ label, result }) => {
+      if (!result.attempted) return;
+      if (result.saved) {
+        savedParts.push(`${label}.pdf (${result.ok}/${result.total})`);
+      } else {
+        allErrors.push(`${label}: could not read any of ${result.total} PDF(s)`);
+      }
+      result.errors.forEach((e) => allErrors.push(`${label} - ${e}`));
+    });
+
+    if (!savedParts.length) {
+      const detail = allErrors.length ? allErrors.join('; ') : 'Nothing could be saved.';
       log(state, `${current.title}: ${detail}`);
       state.results.push({ filingNo: current.filingNo, title: current.title, status: 'error', detail });
       return;
     }
 
-    setAutoProgress('Building merged PDF…', 'info');
-    const mergedBytes = await merged.save();
-    const folderName = uniqueFolderName(state, current.title, `Case ${state.currentIndex + 1}`);
-    // The filename itself repeats the case title (not just "merged.pdf") so
-    // the file is self-identifying even if it ever ends up outside its
-    // folder, or a "Save As" prompt lands somewhere unexpected.
-    const path = `${ROOT_FOLDER}/${folderName}/${folderName}.pdf`;
-
-    setAutoProgress('Saving ' + path + ' …', 'info');
-    await requestDownload(path, mergedBytes);
-
-    const detail =
-      errors.length > 0
-        ? `Saved (${ok}/${scan.docs.length} PDFs; ${errors.length} skipped)`
-        : `Saved (${ok} PDF${ok === 1 ? '' : 's'})`;
-    log(state, `${current.title}: ${detail}${errors.length ? ' — ' + errors.join('; ') : ''}`);
+    const detail = savedParts.join(', ') + (allErrors.length ? ` — issues: ${allErrors.join('; ')}` : '');
+    log(state, `${current.title}: ${detail}`);
     state.results.push({ filingNo: current.filingNo, title: current.title, status: 'done', detail });
   }
 

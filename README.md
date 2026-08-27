@@ -5,19 +5,26 @@ Tribunal e-filing portal's **Submitted Documents** page
 (`https://efiling.gstat.gov.in/submittedDoc.drt`).
 
 It paginates through your full case list, and for every case downloads all
-of its PDF attachments, merges them into a single PDF, and saves it into a
-per-case folder, producing this structure inside your normal Downloads
-folder:
+of its PDF attachments into a per-case folder — the document whose **Doc
+Type** is "Appeal" is saved on its own as `Appeal.pdf`, and everything
+else (Affidavit, Annexure, Show Cause Notice, etc.) is merged into one
+`Other Documents.pdf` — producing this structure inside your normal
+Downloads folder:
 
 ```
 Downloads/
-└── GST Appellate Tribunal/
+└── GST Appellate Tribunal - Split/
     ├── <Case Title 1>/
-    │   └── <Case Title 1>.pdf
+    │   ├── Appeal.pdf
+    │   └── Other Documents.pdf
     ├── <Case Title 2>/
-    │   └── <Case Title 2>.pdf
+    │   ├── Appeal.pdf
+    │   └── Other Documents.pdf
     └── ...
 ```
+
+(A case with no "Appeal"-typed document just gets `Other Documents.pdf`;
+one where every document is typed "Appeal" just gets `Appeal.pdf`.)
 
 Everything happens locally in your browser — no case data, PDFs, or
 filenames are sent anywhere other than the tribunal's own site.
@@ -68,9 +75,11 @@ other page or site.
      (`submittedDoc.drt?reply=&refrenceNo=<filingNo>`),
    - Pages through *that* case's own document table (a case can have more
      documents than fit on one page),
-   - Fetches every PDF and merges them into one,
-   - Saves it as `GST Appellate Tribunal/<Case Title>/<Case Title>.pdf`
-     under your browser's default Downloads folder,
+   - Fetches every PDF, splitting out the one(s) with Doc Type "Appeal"
+     from the rest,
+   - Saves `GST Appellate Tribunal - Split/<Case Title>/Appeal.pdf` and/or
+     `.../Other Documents.pdf` under your browser's default Downloads
+     folder (whichever group has documents),
    - Moves on to the next case.
 
    Because each case lives on its own page, this involves real page
@@ -89,8 +98,8 @@ other page or site.
    a run partway through and start over instead. Chrome's `conflictAction:
    'uniquify'` means re-running from case 1 won't overwrite files already
    saved from a prior run; it'll save alongside them as `Name (1).pdf`
-   etc. Delete the `GST Appellate Tribunal` folder first if you want a
-   clean slate.
+   etc. Delete the `GST Appellate Tribunal - Split` folder first if you
+   want a clean slate.
 
 ## How it actually works (reverse-engineered from the live page)
 
@@ -137,9 +146,15 @@ resuming after an accidental reload work.
   something doesn't work, open the panel's automation log and DevTools
   console (errors are prefixed `[GST Organizer]`) and share what you see.
 - If a case's PDF fails to download (link is stale, session expired, file
-  is encrypted, etc.), that one file is skipped and the rest of that case's
-  PDFs are still merged; a case with zero documents is recorded as such
-  rather than treated as an error.
+  is encrypted, etc.), that one file is skipped and the rest of that
+  group's PDFs are still merged; a case with zero documents is recorded as
+  such rather than treated as an error.
+- The Appeal/Other split is a simple exact match on the row's **Doc Type**
+  column text (case-insensitive, trimmed) equal to `"appeal"` — see
+  `SPLIT_DOC_TYPE` in `content.js`. If the site uses a different label for
+  some cases (e.g. "Appeal Memo"), those rows land in "Other Documents"
+  instead of being split out; tell me the actual label(s) you see and it's
+  a one-line change.
 - The merged PDF is handed to the background service worker as a `blob:`
   URL, not as bytes in the message itself — `chrome.runtime.sendMessage`
   has a ~64MiB payload cap that a document-heavy case's merged PDF can

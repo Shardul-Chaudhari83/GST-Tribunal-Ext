@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "GST Appellate Tribunal - Case PDF Organizer",
-  "version": "2.2.0",
-  "description": "Paginates the GST Appellate Tribunal e-filing case list, then downloads a merged PDF per case, organized into GST Appellate Tribunal/<Case Title>/ folders.",
+  "version": "3.0.0",
+  "description": "Paginates the GST Appellate Tribunal e-filing case list, then per case downloads its Appeal PDF separately from the rest (merged), organized into GST Appellate Tribunal - Split/<Case Title>/ folders.",
   "action": {
     "default_title": "GST Tribunal PDF Organizer"
   },
