@@ -152,10 +152,16 @@ each "Other Documents" PDF, `ocr.js` tries, in order:
    isolated 1–4 digit token in the top ~30% of the first page. Fast and
    exact; works for typed/born-digital documents.
 2. **OCR** (`Tesseract.js`, restricted to digits only) — renders the top
-   band of the first page to a canvas and reads it, for documents with no
-   text layer (scanned documents). A result is only trusted automatically
-   if Tesseract's own confidence score is ≥ 70; below that it's marked
-   `ocr-low`.
+   band of the first page to a canvas, for documents with no text layer
+   (scanned documents). It's read twice — once as rendered, once after a
+   grayscale + contrast-stretch + Otsu-binarization cleanup pass (helps
+   with the grainy, low-contrast photocopies common in scanned filings) —
+   and whichever attempt comes back more confident wins. A result is only
+   trusted automatically if that confidence score is ≥ 70; below that it's
+   marked `ocr-low`. This cleanup step is a real, measurable help for
+   faded/grainy scans; it does not turn OCR into reliable handwriting
+   recognition — a hand-written, circled number is still going to need
+   the review step below more often than a typed one.
 
 If a case has more than one "Other Document" and **any** of them came back
 `ocr-low` or undetected, the run **pauses on that case** instead of
@@ -177,9 +183,9 @@ gets baked into a merged PDF silently.
 **Things worth knowing:**
 - This added ~6.9MB of bundled libraries (`pdf.js` + `Tesseract.js` + its
   WASM OCR core + a compact English trained-data file, all vendored
-  locally — no CDN, per Manifest V3 rules). OCR itself also makes
-  document-heavy, scanned-document cases noticeably slower to process
-  than before.
+  locally — no CDN, per Manifest V3 rules). OCR itself (now two passes per
+  document — raw and cleaned-up) also makes document-heavy, scanned-
+  document cases noticeably slower to process than before.
 - The split/merge logic (`SPLIT_DOC_TYPE` in `content.js`), the OCR
   confidence threshold, and the "top band" search region
   (`OCR_CONFIDENCE_THRESHOLD` / `TOP_BAND_FRACTION` in `ocr.js`) are all

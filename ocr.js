@@ -71,7 +71,97 @@
     return candidates[0].number;
   }
 
-  /** Renders page 1's top band and OCRs it for a 1-4 digit number. */
+  /** Otsu's method: picks the grayscale threshold that best separates ink from background. */
+  function otsuThreshold(hist, total) {
+    let sum = 0;
+    for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sumB = 0;
+    let wB = 0;
+    let varMax = 0;
+    let threshold = 127;
+    for (let t = 0; t < 256; t++) {
+      wB += hist[t];
+      if (wB === 0) continue;
+      const wF = total - wB;
+      if (wF === 0) break;
+      sumB += t * hist[t];
+      const mB = sumB / wB;
+      const mF = (sum - sumB) / wF;
+      const varBetween = wB * wF * (mB - mF) * (mB - mF);
+      if (varBetween > varMax) {
+        varMax = varBetween;
+        threshold = t;
+      }
+    }
+    return threshold;
+  }
+
+  /**
+   * Grayscale + contrast-stretch + Otsu binarization. Faded/low-contrast
+   * photocopies (grainy paper texture, faint pen ink) are common in scanned
+   * legal filings, and this materially helps Tesseract on them — cheap and
+   * deterministic, unlike trying to actually improve handwriting OCR.
+   */
+  function preprocessForOcr(sourceCanvas) {
+    const w = sourceCanvas.width;
+    const h = sourceCanvas.height;
+    const srcCtx = sourceCanvas.getContext('2d');
+    const imgData = srcCtx.getImageData(0, 0, w, h);
+    const data = imgData.data;
+    const n = w * h;
+
+    const gray = new Float32Array(n);
+    let min = 255;
+    let max = 0;
+    for (let i = 0, p = 0; p < n; i += 4, p++) {
+      const g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      gray[p] = g;
+      if (g < min) min = g;
+      if (g > max) max = g;
+    }
+
+    const range = Math.max(1, max - min);
+    const hist = new Array(256).fill(0);
+    const stretched = new Uint8ClampedArray(n);
+    for (let p = 0; p < n; p++) {
+      const s = Math.round(((gray[p] - min) / range) * 255);
+      stretched[p] = s;
+      hist[s] += 1;
+    }
+    const threshold = otsuThreshold(hist, n);
+
+    for (let i = 0, p = 0; p < n; i += 4, p++) {
+      const v = stretched[p] > threshold ? 255 : 0;
+      data[i] = v;
+      data[i + 1] = v;
+      data[i + 2] = v;
+    }
+
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = w;
+    outCanvas.height = h;
+    outCanvas.getContext('2d').putImageData(imgData, 0, 0);
+    return outCanvas;
+  }
+
+  /** Runs OCR on one canvas, returning its best digit-only word match (or null). */
+  async function ocrBestDigitWord(worker, canvas) {
+    const { data } = await worker.recognize(canvas);
+    const words = (data.words || [])
+      .map((w) => ({ ...w, text: (w.text || '').trim() }))
+      .filter((w) => NUMBER_RE.test(w.text));
+    if (!words.length) return null;
+    words.sort((a, b) => b.confidence - a.confidence);
+    return words[0];
+  }
+
+  /**
+   * Renders page 1's top band and OCRs it for a 1-4 digit number. Tries
+   * both the raw crop and a contrast/binarization-preprocessed version,
+   * keeping whichever comes back with higher confidence — preprocessing
+   * helps faded/grainy scans but can occasionally hurt an already-clean
+   * one, so running both and picking the winner is the safer default.
+   */
   async function extractFromOcr(page) {
     const viewport = page.getViewport({ scale: 2.5 }); // upscale small stamps for better OCR
     const fullCanvas = document.createElement('canvas');
@@ -87,16 +177,19 @@
       .getContext('2d')
       .drawImage(fullCanvas, 0, 0, fullCanvas.width, cropHeight, 0, 0, fullCanvas.width, cropHeight);
 
+    const cleanedCanvas = preprocessForOcr(cropCanvas);
+
     const worker = await getOcrWorker();
-    const { data } = await worker.recognize(cropCanvas);
-    const words = (data.words || [])
-      .map((w) => ({ ...w, text: (w.text || '').trim() }))
-      .filter((w) => NUMBER_RE.test(w.text));
+    const [rawBest, cleanedBest] = await Promise.all([
+      ocrBestDigitWord(worker, cropCanvas),
+      ocrBestDigitWord(worker, cleanedCanvas),
+    ]);
 
-    if (!words.length) return { number: null, confidence: 'none' };
+    const candidates = [rawBest, cleanedBest].filter(Boolean);
+    if (!candidates.length) return { number: null, confidence: 'none' };
 
-    words.sort((a, b) => b.confidence - a.confidence);
-    const best = words[0];
+    candidates.sort((a, b) => b.confidence - a.confidence);
+    const best = candidates[0];
     return {
       number: parseInt(best.text, 10),
       confidence: best.confidence >= OCR_CONFIDENCE_THRESHOLD ? 'ocr-high' : 'ocr-low',
