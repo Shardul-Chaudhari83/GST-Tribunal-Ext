@@ -79,13 +79,13 @@ other page or site.
    - Fetches every PDF, splitting out the one(s) with Doc Type "Appeal"
      from the rest,
    - Detects each "Other Documents" PDF's page number (see below) and
-     sorts by it before merging,
+     sorts by it before merging — fully automatically, using whatever it
+     detects (a document it can't read a number for at all just keeps its
+     original upload position; the run never pauses to ask),
    - Saves `GST Appellate Tribunal - Split/<Case Title>/Appeal.pdf` and/or
      `.../Other Documents.pdf` under your browser's default Downloads
      folder (whichever group has documents),
-   - Moves on to the next case — unless the page-number detection wasn't
-     confident, in which case it **pauses on that case** for you to
-     review (see below) before continuing.
+   - Moves on to the next case.
 
    Because each case lives on its own page, this involves real page
    navigations — the panel's progress (current case, current step, and a
@@ -141,7 +141,7 @@ in `chrome.storage.local` under the key `gstAutomation` and picked back up
 on every page load — this is also what makes **Stop After This Case** and
 resuming after an accidental reload work.
 
-## How the page-number ordering works, and the review pause
+## How the page-number ordering works
 
 Court filings are typically hand-compiled with a page number written near
 the top of each document (sometimes typed, sometimes hand-written and
@@ -156,29 +156,18 @@ each "Other Documents" PDF, `ocr.js` tries, in order:
    (scanned documents). It's read twice — once as rendered, once after a
    grayscale + contrast-stretch + Otsu-binarization cleanup pass (helps
    with the grainy, low-contrast photocopies common in scanned filings) —
-   and whichever attempt comes back more confident wins. A result is only
-   trusted automatically if that confidence score is ≥ 70; below that it's
-   marked `ocr-low`. This cleanup step is a real, measurable help for
-   faded/grainy scans; it does not turn OCR into reliable handwriting
-   recognition — a hand-written, circled number is still going to need
-   the review step below more often than a typed one.
+   and whichever attempt comes back more confident wins.
 
-If a case has more than one "Other Document" and **any** of them came back
-`ocr-low` or undetected, the run **pauses on that case** instead of
-guessing: the panel shows every document with its detected number (in an
-editable box) and a confidence badge (green = text, blue = OCR, red = low
-confidence/unknown), sorted by best guess. Fix any numbers that look
-wrong, then:
-
-- **Confirm & Merge** — merges in the order given by the numbers currently
-  in the boxes (edited or not).
-- **Skip (upload order)** — ignores detected numbers entirely for this
-  case and merges in the order the documents were uploaded.
-
-The run then continues to the next case automatically. This is a real,
-inherent accuracy trade-off — OCR on a hand-written, circled number is not
-reliable, and this review step exists specifically so a bad guess never
-gets baked into a merged PDF silently.
+The run is fully automatic and **never pauses to ask** — whatever number
+comes back (however low-confidence) is used to sort; a document where
+nothing at all could be read just keeps its original upload position
+(sorted after every document that did get a number). This is a deliberate
+trade-off: OCR on a hand-written, circled number is not reliable, and on a
+page like the "77" example worked out with the user, it can simply be
+wrong. There is no per-document confirmation step to catch that — if
+ordering turns out wrong for a specific case, it needs to be checked (and,
+if needed, that case's PDFs re-ordered) by hand, same as if this tool
+didn't exist.
 
 **Things worth knowing:**
 - This added ~6.9MB of bundled libraries (`pdf.js` + `Tesseract.js` + its

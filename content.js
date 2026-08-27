@@ -561,90 +561,9 @@
     ]);
   }
 
-  // --- page-number review pause --------------------------------------------
-  // The pause itself is only ever held in-memory (as the `review` object
-  // passed between these functions) since it never needs to survive a
-  // navigation — reviewing happens in place, on the case's own page.
-
-  function confidenceLabel(c) {
-    return { text: 'Text', 'ocr-high': 'OCR', 'ocr-low': 'OCR (low)', none: 'Unknown' }[c] || c;
-  }
-
-  function renderReviewPanel(review) {
-    body().innerHTML = `
-      <div id="gst-auto-status">
-        <strong>Review needed: ${escapeHtml(review.current.title)}</strong>
-        <div class="gst-auto-current">
-          Some "Other Documents" page numbers couldn't be read confidently.
-          Check/fix the number for each below (blank = keep at the end, in
-          upload order), then confirm.
-        </div>
-      </div>
-      <ul class="gst-review-doc-list"></ul>
-      <div id="gst-organizer-actions">
-        <button id="gst-review-confirm" class="gst-btn gst-btn-success">Confirm &amp; Merge</button>
-        <button id="gst-review-skip" class="gst-btn gst-btn-danger">Skip (upload order)</button>
-      </div>
-    `;
-    const list = body().querySelector('.gst-review-doc-list');
-
-    orderOtherDocs(review.analyzedOther).forEach((doc) => {
-      const li = document.createElement('li');
-      li.className = 'gst-review-doc-row';
-
-      const badge = document.createElement('span');
-      badge.className = 'gst-confidence-badge gst-confidence-' + doc.confidence;
-      badge.textContent = confidenceLabel(doc.confidence);
-      if (doc.ocrConfidence !== undefined) badge.title = `OCR confidence: ${doc.ocrConfidence}%`;
-
-      const name = document.createElement('span');
-      name.className = 'gst-review-doc-name';
-      name.textContent = doc.fileName;
-      name.title = doc.docType || '';
-
-      const numInput = document.createElement('input');
-      numInput.type = 'number';
-      numInput.className = 'gst-review-number-input';
-      numInput.value = doc.number ?? '';
-      numInput.placeholder = '#';
-      numInput.addEventListener('input', () => {
-        const v = numInput.value.trim();
-        doc.number = v === '' ? null : Number(v);
-      });
-
-      li.appendChild(badge);
-      li.appendChild(name);
-      li.appendChild(numInput);
-      list.appendChild(li);
-    });
-
-    body()
-      .querySelector('#gst-review-confirm')
-      .addEventListener('click', () => resolveReview(review, true));
-    body()
-      .querySelector('#gst-review-skip')
-      .addEventListener('click', () => resolveReview(review, false));
-  }
-
-  async function resolveReview(review, useEditedNumbers) {
-    const { state, current, splitDocs, analyzedOther, folderName } = review;
-    const otherToUse = useEditedNumbers ? analyzedOther : analyzedOther.map((d) => ({ ...d, number: null }));
-
-    renderAutomationPanel(state);
-    try {
-      await finalizeCase(state, current, splitDocs, otherToUse, folderName);
-    } catch (err) {
-      console.error('[GST Organizer] case failed after review', current.title, err);
-      log(state, `${current.title}: unexpected error — ${err.message}`);
-      state.results.push({ filingNo: current.filingNo, title: current.title, status: 'error', detail: err.message });
-    }
-    await finishCaseStep(state);
-  }
-
   // --- main per-case step ---------------------------------------------------
 
-  /** Processes the case whose document-list page we're currently on. Returns
-   *  true if it paused for review (caller must not advance/navigate yet). */
+  /** Processes the case whose document-list page we're currently on. */
   async function processCurrentCase(state, current) {
     setAutoProgress('Scanning document pages…', 'info');
     const scan = await window.GSTScraper.scanAllDocPages(({ page, count }) => {
@@ -654,32 +573,25 @@
     if (scan.error) {
       log(state, `${current.title}: ${scan.error}`);
       state.results.push({ filingNo: current.filingNo, title: current.title, status: 'error', detail: scan.error });
-      return false;
+      return;
     }
     if (!scan.docs.length) {
       log(state, `${current.title}: no documents found.`);
       state.results.push({ filingNo: current.filingNo, title: current.title, status: 'empty', detail: 'No documents' });
-      return false;
+      return;
     }
 
     // Doc Type = SPLIT_DOC_TYPE (e.g. "Appeal") is saved as its own file;
     // everything else is merged into one "Other Documents" file, ordered by
-    // each document's detected page number.
+    // each document's detected page number — automatically, using whatever
+    // was detected (text, OCR, or — failing both — its original upload
+    // position). Never pauses for confirmation.
     const splitDocs = scan.docs.filter((d) => (d.docType || '').trim().toLowerCase() === SPLIT_DOC_TYPE);
     const otherDocsRaw = scan.docs.filter((d) => (d.docType || '').trim().toLowerCase() !== SPLIT_DOC_TYPE);
     const folderName = uniqueFolderName(state, current.title, `Case ${state.currentIndex + 1}`);
 
     const analyzedOther = await analyzeOtherDocs(otherDocsRaw);
-    const needsReview =
-      analyzedOther.length > 1 && analyzedOther.some((d) => d.confidence === 'ocr-low' || d.confidence === 'none');
-
-    if (needsReview) {
-      renderReviewPanel({ state, current, splitDocs, analyzedOther, folderName });
-      return true;
-    }
-
     await finalizeCase(state, current, splitDocs, analyzedOther, folderName);
-    return false;
   }
 
   async function runAutomationStep(state) {
@@ -707,16 +619,13 @@
     }
 
     renderAutomationPanel(state);
-    let paused = false;
     try {
-      paused = await processCurrentCase(state, current);
+      await processCurrentCase(state, current);
     } catch (err) {
       console.error('[GST Organizer] case failed', current.title, err);
       log(state, `${current.title}: unexpected error — ${err.message}`);
       state.results.push({ filingNo: current.filingNo, title: current.title, status: 'error', detail: err.message });
     }
-
-    if (paused) return; // renderReviewPanel is showing; resolveReview() continues the run
 
     await finishCaseStep(state);
   }
