@@ -379,6 +379,26 @@
     });
   }
 
+  /**
+   * Page-number detection (pdf.js text extraction + Tesseract OCR) runs in
+   * background.js, not here — see background.js's header comment for why
+   * (this site's CSP blocks the blob-URL worker relay pdf.js/Tesseract.js
+   * need when created from a content script). A single un-merged
+   * document's bytes are small enough to pass through sendMessage directly
+   * (unlike the merged-PDF download, which needs the blob relay).
+   */
+  function requestPageNumberDetection(bytes) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'GST_DETECT_PAGE_NUMBER', bytes }, (response) => {
+        if (chrome.runtime.lastError || !response) {
+          resolve({ number: null, confidence: 'none', error: chrome.runtime.lastError?.message });
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
   // Folder-name de-duplication has to survive across page loads (each case
   // is processed on its own navigation, in a fresh JS context), so it's
   // tracked in the persisted state rather than a module-level Set.
@@ -496,9 +516,8 @@
       let confidence = 'none';
       let ocrConfidence;
       if (bytes) {
-        const detected = await window.GSTPageNumber.detectPageNumber(bytes, (msg) =>
-          setAutoProgress(`${doc.fileName}: ${msg}`, 'info')
-        );
+        setAutoProgress(`Reading page number: ${doc.fileName}…`, 'info');
+        const detected = await requestPageNumberDetection(bytes);
         number = detected.number;
         confidence = detected.confidence;
         ocrConfidence = detected.ocrConfidence;

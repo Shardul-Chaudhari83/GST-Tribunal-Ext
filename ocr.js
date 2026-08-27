@@ -15,11 +15,21 @@
  *     'ocr-low' so content.js can route them through user review instead
  *     of silently trusting a guess.
  *
- * All the OCR/PDF-rendering libraries (pdf.js, Tesseract.js) are loaded as
- * plain <script>s before this file (see manifest.json), exposing the
- * globals `pdfjsLib` and `Tesseract`.
+ * Runs inside background.js (the MV3 service worker), NOT the content
+ * script — pdf.js/Tesseract.js both need to spin up their own Workers, and
+ * doing that from a content script means the worker is created cross-origin
+ * from the page it's injected into (extension origin vs. the site's
+ * origin), which forces a blob-URL relay that a strict site CSP can (and,
+ * on this site, does) block outright. A service worker isn't a "page" and
+ * isn't subject to the site's CSP at all, and here creator + worker script
+ * are both the extension's own origin, so no blob relay is needed.
  *
- * Exposes window.GSTPageNumber.detectPageNumber(bytes, progressCb).
+ * Since there's no `document`/`window` here, canvases are OffscreenCanvas
+ * (pdf.js and Tesseract.js both support it directly).
+ *
+ * `importScripts()`'d by background.js, after pdf.min.js and
+ * tesseract.min.js (which expose the globals `pdfjsLib` and `Tesseract`).
+ * Exposes self.GSTPageNumber.detectPageNumber(bytes).
  */
 (function (global) {
   'use strict';
@@ -32,7 +42,7 @@
 
   let ocrWorkerPromise = null;
 
-  /** Lazily creates one Tesseract worker, reused for every document on this page load. */
+  /** Lazily creates one Tesseract worker, reused for every document. */
   function getOcrWorker() {
     if (!ocrWorkerPromise) {
       ocrWorkerPromise = Tesseract.createWorker('eng', 1, {
@@ -137,9 +147,7 @@
       data[i + 2] = v;
     }
 
-    const outCanvas = document.createElement('canvas');
-    outCanvas.width = w;
-    outCanvas.height = h;
+    const outCanvas = new OffscreenCanvas(w, h);
     outCanvas.getContext('2d').putImageData(imgData, 0, 0);
     return outCanvas;
   }
@@ -164,15 +172,11 @@
    */
   async function extractFromOcr(page) {
     const viewport = page.getViewport({ scale: 2.5 }); // upscale small stamps for better OCR
-    const fullCanvas = document.createElement('canvas');
-    fullCanvas.width = Math.ceil(viewport.width);
-    fullCanvas.height = Math.ceil(viewport.height);
+    const fullCanvas = new OffscreenCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
     await page.render({ canvasContext: fullCanvas.getContext('2d'), viewport }).promise;
 
     const cropHeight = Math.round(fullCanvas.height * TOP_BAND_FRACTION);
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = fullCanvas.width;
-    cropCanvas.height = cropHeight;
+    const cropCanvas = new OffscreenCanvas(fullCanvas.width, cropHeight);
     cropCanvas
       .getContext('2d')
       .drawImage(fullCanvas, 0, 0, fullCanvas.width, cropHeight, 0, 0, fullCanvas.width, cropHeight);
@@ -200,9 +204,8 @@
   /**
    * Returns { number: number|null, confidence: 'text'|'ocr-high'|'ocr-low'|'none', ocrConfidence?, error? }
    */
-  async function detectPageNumber(bytes, progressCb) {
+  async function detectPageNumber(bytes) {
     try {
-      if (progressCb) progressCb('Reading page number…');
       // pdf.js needs its own copy of the bytes (it may transfer/detach the buffer).
       const pdf = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
       const page = await pdf.getPage(1);
@@ -212,7 +215,6 @@
         return { number: textNumber, confidence: 'text' };
       }
 
-      if (progressCb) progressCb('No text layer found — running OCR…');
       return await extractFromOcr(page);
     } catch (err) {
       console.error('[GST Organizer] page-number detection failed', err);
@@ -221,4 +223,4 @@
   }
 
   global.GSTPageNumber = { detectPageNumber };
-})(window);
+})(self);

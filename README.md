@@ -190,14 +190,31 @@ gets baked into a merged PDF silently.
   confidence threshold, and the "top band" search region
   (`OCR_CONFIDENCE_THRESHOLD` / `TOP_BAND_FRACTION` in `ocr.js`) are all
   small, named constants if they need tuning.
-- **Untested caveat**: OCR runs inside the content script (the page's own
-  JS context) so it can use `<canvas>`, which a background service worker
-  can't. If this specific site's Content-Security-Policy turns out to
-  block WebAssembly or Worker creation for content scripts (impossible to
-  confirm without live access to the site), OCR would fail with a clear
-  error in the log rather than silently — if you see that, tell me and
-  this can be moved to run inside `background.js` instead, which has its
-  own CSP unaffected by the page's.
+- **`ocr.js` runs inside `background.js` (the service worker), not the
+  content script.** The first version of this feature ran it in the
+  content script and hit exactly the failure mode flagged as a risk up
+  front: pdf.js/Tesseract.js each need to spin up their own Worker, and
+  creating one from a content script means the worker script (extension
+  origin) is cross-origin from the page it's injected into (the site),
+  which forces a blob-URL relay — and this site's CSP has no `worker-src`
+  (falling back to `script-src`, which doesn't allow `blob:`), so Chrome
+  blocked it outright (`Creating a worker from 'blob:...' violates the
+  following Content Security Policy directive`). A service worker isn't a
+  "page" and isn't bound by the site's CSP at all, and there both the
+  worker script and its creator are the same extension origin, so no blob
+  relay is needed. `content.js` sends each document's bytes to
+  `background.js` for detection (small enough per-document to go straight
+  through `chrome.runtime.sendMessage`, unlike a merged PDF) and gets back
+  just the `{number, confidence}` result. This needed `OffscreenCanvas`
+  instead of a real `<canvas>` (no DOM in a service worker) and an
+  explicit `'wasm-unsafe-eval'` in `manifest.json`'s
+  `content_security_policy.extension_pages` for Tesseract's WASM core —
+  both are in place, but this exact combination (pdf.js + Tesseract.js
+  inside an MV3 service worker) is still something I reasoned through
+  rather than watched run, so if a *new* error shows up, check the
+  **service worker's own console**, not the page's: `chrome://extensions`
+  → this extension → **service worker** (Brave: **Inspect views**) — that
+  opens a separate DevTools window for `background.js` specifically.
 
 ## Notes & limitations
 
@@ -236,16 +253,17 @@ gets baked into a merged PDF silently.
 
 ```
 manifest.json     Manifest V3 extension config
-background.js     Service worker: performs the actual chrome.downloads call
-content.js        Panel UI + the cross-page automation state machine
-scraper.js        Site-specific scraping: pagination, XOR-hex PDF URLs
+background.js     Service worker: chrome.downloads calls + page-number detection (imports ocr.js)
+content.js        Panel UI + the cross-page automation state machine (runs in the page)
+scraper.js        Site-specific scraping: pagination, XOR-hex PDF URLs (runs in the page)
 ocr.js            Page-number detection: pdf.js text layer, Tesseract.js OCR fallback
+                    (imported by background.js — see "How the page-number ordering works")
 content.css       Panel styling
 vendor/           Bundled locally (all Apache-2.0/MIT) — no CDN dependency:
-  pdf-lib.min.js         builds/merges PDFs
-  pdf.min.js + pdf.worker.min.js         reads PDF text/renders pages (pdf.js)
+  pdf-lib.min.js         builds/merges PDFs (used by content.js)
+  pdf.min.js + pdf.worker.min.js         reads PDF text/renders pages (pdf.js, used by ocr.js)
   tesseract.min.js + tesseract-worker.min.js
-    + tesseract-core-lstm.{js,wasm} + eng.traineddata.gz   OCR (Tesseract.js)
+    + tesseract-core-lstm.{js,wasm} + eng.traineddata.gz   OCR (Tesseract.js, used by ocr.js)
 ```
 
 No custom toolbar icon is bundled, so Chrome shows its default
